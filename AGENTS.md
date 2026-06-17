@@ -13,6 +13,7 @@
 - Added document factory helpers in `src/factory/index.ts` for creating documents, staves, voices, syllables, neume groups, and text-to-music alignment links without hand-wiring every dictionary.
 - Added renderer-facing IR utilities in `src/query/index.ts` for voice event traversal, event ranges, neume/note expansion, alignment lookup, text lookup, active clef lookup, and clef-relative staff position calculation.
 - Added document integrity validation in `src/validate/index.ts` for text, music, alignment, editorial, and layout preference references.
+- Added `README.md` with project overview, setup/build/typecheck commands, example usage, fixture notes, module map, and current scope.
 - Exported all public classes from `src/index.ts`.
 
 ## Verification
