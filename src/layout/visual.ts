@@ -2,7 +2,7 @@ import type { AlignmentRelation } from "../alignment";
 import type { Id } from "../common";
 import type { ChantDocument } from "../document";
 import { BarEvent, ClefChange, NeumeGroupEvent, type ClefDef, type Staff, type Voice } from "../music";
-import { getStaffPosition, getTextForEvent, getTextForSpan, getVoiceEvents } from "../query";
+import { getStaffPosition, getTextForEvent, getVoiceEvents } from "../query";
 
 export type LayoutPageMode = "continuous" | "paged";
 export type LayoutRendererKind = "svg" | "canvas" | "webgl" | "hybrid";
@@ -290,7 +290,7 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
     neumes,
   };
 
-  let x = STAFF_LEFT + 0.2;
+  let x = STAFF_LEFT;
   const clefEvent = primaryVoice === undefined
     ? undefined
     : getVoiceEvents(document, primaryVoice.id).find((entry) => entry.event instanceof ClefChange);
@@ -310,12 +310,30 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
 
   if (primaryVoice !== undefined) {
     voiceToSystemIds[primaryVoice.id] = [systemId];
+    let pendingClefX: number | undefined;
+
     for (const entry of getVoiceEvents(document, primaryVoice.id)) {
       if (entry.event instanceof ClefChange) {
+        if (entry.eventId !== clefSemanticId) {
+          const clefX = pendingClefX ?? x;
+          const inlineClefGlyph = makeClefGlyph(
+            `lg_${safeId(entry.eventId)}_clef`,
+            entry.eventId,
+            systemId,
+            layoutStaffId,
+            clefX,
+            entry.event.clef,
+          );
+          glyphs.push(inlineClefGlyph);
+          addIndex(semanticToLayoutIds, entry.eventId, inlineClefGlyph.id);
+          x = clefX + 2.4;
+        }
+        pendingClefX = undefined;
         continue;
       }
 
       if (entry.event instanceof NeumeGroupEvent) {
+        pendingClefX = undefined;
         const neumeGroup = document.music.neumeGroups[entry.event.neumeGroupId];
         if (neumeGroup === undefined) {
           continue;
@@ -342,20 +360,21 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
           kind: "barline",
           x,
           y: STAFF_TOP,
-          width: entry.event.kind === "double" || entry.event.kind === "final" ? 0.55 : 0.2,
+          width: entry.event.kind === "double" || entry.event.kind === "final" ? 0.35 : LINE_THICKNESS,
           height: 3,
           zIndex: 2,
           classes: ["barline", `barline-${entry.event.kind}`],
         });
         glyphs.push(barGlyph);
         addIndex(semanticToLayoutIds, entry.eventId, barGlyph.id);
+        pendingClefX = x;
         x += BAR_GAP;
       }
     }
   }
 
   const syllables = layoutSyllables(document, systemId, textSpanToNeumeIds, textSpanRelations, neumes, textSpanToSyllableIds, semanticToLayoutIds);
-  const textRuns = syllables.map((syllable) => makeTextRun(document, systemId, syllable));
+  const textRuns = layoutLyricTextRuns(document, systemId, syllables);
   const height = STAFF_TOP + LYRIC_BASELINE_OFFSET + 2;
   const layoutStaff: LayoutStaff = {
     id: layoutStaffId,
@@ -369,7 +388,7 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
     ledgerSegments: [],
     clefRuns: primaryStaff === undefined ? [] : [{
       clefEventId: clefSemanticId,
-      x: STAFF_LEFT + 0.2,
+      x: STAFF_LEFT,
       glyphId: clefGlyphId,
       governsFromMusicEventId: firstNeumeEventId(document, primaryVoice),
     }],
@@ -537,7 +556,7 @@ function layoutSyllables(
     const firstNeume = attachedNeumes[0];
     const span = document.text.spans[textSpanId];
     const firstSyllable = span?.syllableIds[0] === undefined ? undefined : document.text.syllables[span.syllableIds[0]];
-    const text = getTextForSpan(document, textSpanId);
+    const text = getHyphenatedTextForSpan(document, textSpanId);
     const textWidth = measureText(text);
     const spanStart = Math.min(...attachedNeumes.map((neume) => neume.textAttachment.visualSpanX1));
     const spanEnd = Math.max(...attachedNeumes.map((neume) => neume.textAttachment.visualSpanX2));
@@ -577,8 +596,54 @@ function layoutSyllables(
   });
 }
 
+function layoutLyricTextRuns(document: ChantDocument, systemId: Id, syllables: LayoutSyllable[]): LayoutTextRun[] {
+  const lyricRuns = syllables.map((syllable) => makeTextRun(document, systemId, syllable));
+  const hyphenRuns: LayoutTextRun[] = [];
+  const sortedSyllables = [...syllables].sort((left, right) =>
+    left.anchorX - right.anchorX || left.id.localeCompare(right.id),
+  );
+
+  for (let index = 0; index < sortedSyllables.length - 1; index += 1) {
+    const left = sortedSyllables[index];
+    const right = sortedSyllables[index + 1];
+
+    if (!shouldHyphenateBetween(document, left, right)) {
+      continue;
+    }
+
+    const leftRight = left.bounds.x + left.bounds.width;
+    const rightLeft = right.bounds.x;
+    const x = rightLeft > leftRight
+      ? leftRight + ((rightLeft - leftRight) / 2)
+      : (left.anchorX + right.anchorX) / 2;
+
+    hyphenRuns.push({
+      id: `txt_hyphen_${safeId(left.semanticTextSpanId)}_${safeId(right.semanticTextSpanId)}`,
+      role: "lyric",
+      text: "-",
+      systemId,
+      attachedTo: {
+        kind: "system",
+        id: systemId,
+      },
+      x,
+      y: left.baselineY,
+      width: measureText("-"),
+      height: TEXT_HEIGHT,
+      baselineY: left.baselineY,
+      align: "centre",
+      fontKey: "lyricMain",
+      classes: ["lyric", "lyric-hyphen"],
+    });
+  }
+
+  return [...lyricRuns, ...hyphenRuns].sort((left, right) =>
+    left.x - right.x || left.id.localeCompare(right.id),
+  );
+}
+
 function makeTextRun(document: ChantDocument, systemId: Id, syllable: LayoutSyllable): LayoutTextRun {
-  const text = getTextForSpan(document, syllable.semanticTextSpanId);
+  const text = getHyphenatedTextForSpan(document, syllable.semanticTextSpanId);
 
   return {
     id: syllable.lyricRunId,
@@ -601,8 +666,81 @@ function makeTextRun(document: ChantDocument, systemId: Id, syllable: LayoutSyll
   };
 }
 
+function shouldHyphenateBetween(document: ChantDocument, left: LayoutSyllable, right: LayoutSyllable): boolean {
+  if (left.wordId === undefined || left.wordId !== right.wordId) {
+    return false;
+  }
+
+  const word = document.text.words[left.wordId];
+
+  if (word === undefined) {
+    return false;
+  }
+
+  const leftLastIndex = lastSyllableIndexForSpan(document, word.syllableIds, left.semanticTextSpanId);
+  const rightFirstIndex = firstSyllableIndexForSpan(document, word.syllableIds, right.semanticTextSpanId);
+
+  return leftLastIndex >= 0 && rightFirstIndex === leftLastIndex + 1;
+}
+
+function getHyphenatedTextForSpan(document: ChantDocument, textSpanId: Id): string {
+  const span = document.text.spans[textSpanId];
+
+  if (span === undefined) {
+    return "";
+  }
+
+  return span.syllableIds.map((syllableId, index) => {
+    const syllable = document.text.syllables[syllableId];
+    const text = syllable?.text ?? "";
+    const nextSyllableId = span.syllableIds[index + 1];
+    const nextSyllable = nextSyllableId === undefined ? undefined : document.text.syllables[nextSyllableId];
+    const needsHyphen = syllable?.wordId !== undefined && syllable.wordId === nextSyllable?.wordId;
+
+    return needsHyphen ? `${text}-` : text;
+  }).join("");
+}
+
+function firstSyllableIndexForSpan(document: ChantDocument, syllableIds: Id[], textSpanId: Id): number {
+  const span = document.text.spans[textSpanId];
+
+  if (span === undefined) {
+    return -1;
+  }
+
+  for (const syllableId of span.syllableIds) {
+    const index = syllableIds.indexOf(syllableId);
+
+    if (index >= 0) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function lastSyllableIndexForSpan(document: ChantDocument, syllableIds: Id[], textSpanId: Id): number {
+  const span = document.text.spans[textSpanId];
+
+  if (span === undefined) {
+    return -1;
+  }
+
+  for (let index = span.syllableIds.length - 1; index >= 0; index -= 1) {
+    const wordIndex = syllableIds.indexOf(span.syllableIds[index]);
+
+    if (wordIndex >= 0) {
+      return wordIndex;
+    }
+  }
+
+  return -1;
+}
+
 function makeClefGlyph(id: Id, semanticId: Id, systemId: Id, staffId: Id, x: number, clef?: ClefDef): LayoutGlyph {
   const line = clef?.line ?? 3;
+  const staffLine = Math.min(4, Math.max(1, line));
+  const lineY = STAFF_TOP + (4 - staffLine);
   return makeGlyph({
     id,
     semanticId,
@@ -611,7 +749,7 @@ function makeClefGlyph(id: Id, semanticId: Id, systemId: Id, staffId: Id, x: num
     defKey: clef?.shape === "f" ? "clefF" : "clefC",
     kind: "clef",
     x,
-    y: STAFF_TOP + (line - 1) - 1,
+    y: lineY - 1,
     width: 1.3,
     height: 2,
     zIndex: 2,
@@ -661,11 +799,11 @@ function defaultGlyphDefs(): LayoutGlyphDef[] {
     glyphDef("custosDescShort", 0.4, 1.7),
     glyphDef("clefC", 1.3, 2),
     glyphDef("clefF", 1.3, 2),
-    glyphDef("barQuarter", 0.15, 1.5),
-    glyphDef("barHalf", 0.15, 2),
-    glyphDef("barFull", 0.2, 3),
-    glyphDef("barDouble", 0.55, 3),
-    glyphDef("barFinal", 0.55, 3),
+    glyphDef("barQuarter", LINE_THICKNESS, 1.5),
+    glyphDef("barHalf", LINE_THICKNESS, 2),
+    glyphDef("barFull", LINE_THICKNESS, 3),
+    glyphDef("barDouble", 0.35, 3),
+    glyphDef("barFinal", 0.35, 3),
   ];
 }
 

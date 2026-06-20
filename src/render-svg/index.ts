@@ -104,13 +104,13 @@ function renderSystem(system: LayoutSystem, scale: number, lineThickness: number
   const glyphsByParent = groupGlyphsByParent(system.glyphs);
   const unparentedGlyphs = glyphsByParent.get("") ?? [];
   for (const glyph of unparentedGlyphs) {
-    parts.push(renderGlyph(glyph, scale));
+    parts.push(renderGlyph(glyph, scale, lineThickness));
   }
 
   for (const neume of [...system.neumes].sort((left, right) => left.id.localeCompare(right.id))) {
     parts.push(`<g id="${escapeAttr(neume.id)}" class="neuma-neume" data-semantic-id="${escapeAttr(neume.semanticNeumeId)}">`);
     for (const glyph of glyphsByParent.get(neume.id) ?? []) {
-      parts.push(renderGlyph(glyph, scale));
+      parts.push(renderGlyph(glyph, scale, lineThickness));
     }
     parts.push(renderHitBox(`${neume.id}_hit`, neume.rect, scale, neume.semanticNeumeId));
     parts.push("</g>");
@@ -132,13 +132,39 @@ function renderSystem(system: LayoutSystem, scale: number, lineThickness: number
   return parts.join("");
 }
 
-function renderGlyph(glyph: LayoutGlyph, scale: number): string {
+function renderGlyph(glyph: LayoutGlyph, scale: number, lineThickness: number): string {
+  if (glyph.kind === "barline") {
+    return renderBarline(glyph, scale, lineThickness);
+  }
+
   const href = `#glyph-${glyph.defKey}`;
   const classes = ["neuma-glyph", ...glyph.classes].join(" ");
   const semanticAttr = glyph.semanticId === undefined ? "" : ` data-semantic-id="${escapeAttr(glyph.semanticId)}"`;
   const parts = [
     `<use id="${escapeAttr(glyph.id)}" class="${escapeAttr(classes)}"${semanticAttr} href="${escapeAttr(href)}" x="${fmt(toPx(glyph.x, scale))}" y="${fmt(toPx(glyph.y, scale))}" width="${fmt(toPx(glyph.width, scale))}" height="${fmt(toPx(glyph.height, scale))}"/>`,
   ];
+
+  if (glyph.hitBox !== undefined) {
+    parts.push(renderHitBox(`${glyph.id}_hit`, glyph.hitBox, scale, glyph.semanticId));
+  }
+
+  return parts.join("");
+}
+
+function renderBarline(glyph: LayoutGlyph, scale: number, lineThickness: number): string {
+  const classes = ["neuma-barline", ...glyph.classes].join(" ");
+  const semanticAttr = glyph.semanticId === undefined ? "" : ` data-semantic-id="${escapeAttr(glyph.semanticId)}"`;
+  const strokeWidth = fmt(toPx(lineThickness, scale));
+  const y1 = fmt(toPx(glyph.y, scale));
+  const y2 = fmt(toPx(glyph.y + glyph.height, scale));
+  const x = toPx(glyph.x, scale);
+  const gap = toPx(0.35, scale);
+  const xs = glyph.defKey === "barDouble" || glyph.defKey === "barFinal"
+    ? [x, x + gap]
+    : [x];
+  const parts = xs.map((lineX, index) => (
+    `<line id="${escapeAttr(index === 0 ? glyph.id : `${glyph.id}_${index + 1}`)}" class="${escapeAttr(classes)}"${semanticAttr} x1="${fmt(lineX)}" y1="${y1}" x2="${fmt(lineX)}" y2="${y2}" stroke="#161616" stroke-width="${strokeWidth}" stroke-linecap="square"/>`
+  ));
 
   if (glyph.hitBox !== undefined) {
     parts.push(renderHitBox(`${glyph.id}_hit`, glyph.hitBox, scale, glyph.semanticId));
@@ -159,7 +185,7 @@ function renderSymbol(def: LayoutGlyphDef, scale: number): string {
   const asset = loadGlyphAsset(def.key);
 
   if (asset !== undefined) {
-    return `<symbol id="${escapeAttr(id)}" viewBox="${escapeAttr(asset.viewBox)}">${asset.body}</symbol>`;
+    return `<symbol id="${escapeAttr(id)}" viewBox="${escapeAttr(asset.viewBox)}" preserveAspectRatio="xMinYMid meet">${asset.body}</symbol>`;
   }
 
   return `<symbol id="${escapeAttr(id)}" viewBox="0 0 ${fmt(width)} ${fmt(height)}">${symbolBody(def.key, width, height)}</symbol>`;
@@ -229,11 +255,11 @@ function symbolBody(key: string, width: number, height: number): string {
       return `<path d="M0 ${fmt(height * 0.55)}L${fmt(width * 0.2)} ${fmt(height * 0.25)}L${fmt(width * 0.4)} ${fmt(height * 0.55)}L${fmt(width * 0.6)} ${fmt(height * 0.25)}L${fmt(width * 0.8)} ${fmt(height * 0.55)}L${fmt(width)} ${fmt(height * 0.25)}V${fmt(height * 0.8)}H0Z"/>`;
     case "barDouble":
     case "barFinal":
-      return `<rect x="0" y="0" width="${fmt(width * 0.25)}" height="${fmt(height)}"/><rect x="${fmt(width * 0.65)}" y="0" width="${fmt(width * 0.35)}" height="${fmt(height)}"/>`;
+      return `<line x1="0" y1="0" x2="0" y2="${fmt(height)}" stroke="currentColor" stroke-width="${fmt(width)}" stroke-linecap="square"/><line x1="${fmt(width * 3)}" y1="0" x2="${fmt(width * 3)}" y2="${fmt(height)}" stroke="currentColor" stroke-width="${fmt(width)}" stroke-linecap="square"/>`;
     case "barQuarter":
     case "barHalf":
     case "barFull":
-      return `<rect x="0" y="0" width="${fmt(width)}" height="${fmt(height)}"/>`;
+      return `<line x1="${fmt(width / 2)}" y1="0" x2="${fmt(width / 2)}" y2="${fmt(height)}" stroke="currentColor" stroke-width="${fmt(width)}" stroke-linecap="square"/>`;
     default:
       return `<rect x="0" y="0" width="${fmt(width)}" height="${fmt(height)}"/>`;
   }

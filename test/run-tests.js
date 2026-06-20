@@ -8,6 +8,7 @@ const {
   ChantDocument,
   ClefDef,
   DocumentMetadata,
+  kyrieEleisonExampleDocument,
   kyrieExampleDocument,
   layoutChant,
   MusicPlane,
@@ -29,6 +30,7 @@ const {
 
 function run() {
   testKyrieLayoutAndSvg();
+  testKyrieEleisonFixtureTransposition();
   testMultiNeumeMelisma();
   testWriteSvgFile();
   console.log("All tests passed.");
@@ -46,12 +48,35 @@ function testKyrieLayoutAndSvg() {
   assert.ok(layout.index.semanticToLayoutIds.note_ky_1.length > 0);
   assert.ok(layout.index.semanticToLayoutIds.ng_ky.length > 0);
   assert.ok(layout.index.semanticToLayoutIds.span_ky.length > 0);
+  const glyphs = layout.systems[0].glyphs;
+  const clefGlyph = glyphs.find((glyph) => glyph.id === "lg_evt_clef_clef");
+  const lowerNote = glyphs.find((glyph) => glyph.id === "lg_note_ky_1");
+  const upperNote = glyphs.find((glyph) => glyph.id === "lg_note_ky_2");
+  assert.ok(clefGlyph);
+  assert.ok(lowerNote);
+  assert.ok(upperNote);
+  assert.equal(clefGlyph.y, 2);
+  assert.ok(upperNote.y < lowerNote.y);
   assert.ok(svg.startsWith("<svg"));
   assert.ok(svg.includes("data-semantic-id"));
   assert.ok(svg.includes('data-exsurge-glyph="PunctumCuadratum"'));
   assert.ok(svg.includes('data-exsurge-glyph="Quilisma"'));
+  assert.ok(svg.includes('id="glyph-clefC"'));
+  assert.ok(svg.includes('preserveAspectRatio="xMinYMid meet"'));
+  assert.ok(layout.systems[0].textRuns.some((run) => run.text === "-"));
+  assert.ok(svg.includes(">ri-e<"));
   assert.equal(svg, svgAgain);
   assert.equal(JSON.stringify(kyrieExampleDocument), before);
+}
+
+function testKyrieEleisonFixtureTransposition() {
+  const clef = kyrieEleisonExampleDocument.music.staves.staff_main.defaultClef;
+  const firstNote = kyrieEleisonExampleDocument.music.notes.note_p1_1_1;
+
+  assert.ok(clef);
+  assert.ok(firstNote);
+  assert.equal(clef.line, 4);
+  assert.equal(firstNote.pitch.diatonicIndex, -3);
 }
 
 function testMultiNeumeMelisma() {

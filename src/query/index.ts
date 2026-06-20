@@ -179,12 +179,12 @@ export function getActiveClefAtEvent(doc: ChantDocument, voiceId: Id, eventId: I
 }
 
 export function getStaffPosition(pitch: StaffPitch, clef: ClefDef, staffLineCount = 4): StaffPosition {
-  const clefStep = (clef.line - 1) * 2;
-  const staffStep = clefStep + pitch.diatonicIndex;
+  const clefStep = (staffLineCount - clef.line) * 2;
+  const staffStep = clefStep - pitch.diatonicIndex;
   const maxStaffStep = (staffLineCount - 1) * 2;
   const isOnLine = staffStep % 2 === 0;
   const line = isOnLine && staffStep >= 0 && staffStep <= maxStaffStep
-    ? (staffStep / 2) + 1
+    ? staffLineCount - (staffStep / 2)
     : undefined;
   const ledgerSteps = staffStep < 0
     ? staffStep
