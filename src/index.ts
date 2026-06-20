@@ -3,6 +3,7 @@ export * from "./alignment";
 export * from "./common";
 export * from "./document";
 export * from "./editorial";
+export * from "./examples/kyrie-eleison";
 export * from "./examples/kyrie";
 export * from "./factory";
 export * from "./layout";
