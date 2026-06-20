@@ -142,3 +142,7 @@ vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
 sample.js
+test.svg
+test/output/
+.tmp/
+*.tgz

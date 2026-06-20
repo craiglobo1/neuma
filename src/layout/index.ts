@@ -40,3 +40,5 @@ export class LayoutPreferencePlane {
     public engravingProfileId?: string,
   ) {}
 }
+
+export * from "./visual";

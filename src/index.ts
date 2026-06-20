@@ -8,5 +8,6 @@ export * from "./factory";
 export * from "./layout";
 export * from "./music";
 export * from "./query";
+export * from "./render-svg";
 export * from "./text";
 export * from "./validate";
