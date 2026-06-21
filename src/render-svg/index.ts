@@ -22,6 +22,7 @@ type SvgGlyphAsset = {
 };
 
 const GLYPH_ASSET_NAMES: Record<string, string> = {
+  none: "None",
   clefC: "DoClef",
   clefF: "FaClef",
   punctum: "PunctumCuadratum",
