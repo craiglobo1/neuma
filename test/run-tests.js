@@ -45,7 +45,9 @@ function run() {
   testDottedNeumeSigns();
   testLowNeumePushesLyricBaseline();
   testSyllabicPhraseHelpers();
+  testSyllabicPhraseBarAndTextOnly();
   testSyllabicPhraseMixedNeumeMelisma();
+  testPorrectusEndingVariants();
   testMultiNeumeMelisma();
   testWriteSvgFile();
   console.log("All tests passed.");
@@ -60,6 +62,8 @@ function testKyrieLayoutAndSvg() {
   assert.equal(layout.schema, "neuma.layout");
   assert.equal(layout.systems.length, 1);
   assert.equal(layout.systems[0].staffs[0].lineCount, 4);
+  assert.equal(layout.units.lyricTextSize, 1.8);
+  assert.deepEqual(layout.systems[0].staffs[0].lineYs, [3, 5, 7, 9]);
   assert.ok(layout.index.semanticToLayoutIds.note_ky_1.length > 0);
   assert.ok(layout.index.semanticToLayoutIds.ng_ky.length > 0);
   assert.ok(layout.index.semanticToLayoutIds.span_ky.length > 0);
@@ -70,7 +74,9 @@ function testKyrieLayoutAndSvg() {
   assert.ok(clefGlyph);
   assert.ok(lowerNote);
   assert.ok(upperNote);
-  assert.equal(clefGlyph.y, 2);
+  assert.equal(clefGlyph.y, 3 - (clefGlyph.height / 2));
+  assert.equal(lowerNote.width, 1);
+  assert.equal(lowerNote.height, 1.2343799591064453);
   assert.ok(upperNote.y < lowerNote.y);
   assert.ok(svg.startsWith("<svg"));
   assert.ok(svg.includes("data-semantic-id"));
@@ -78,6 +84,7 @@ function testKyrieLayoutAndSvg() {
   assert.ok(svg.includes('data-exsurge-glyph="Quilisma"'));
   assert.ok(svg.includes('id="glyph-clefC"'));
   assert.ok(svg.includes('preserveAspectRatio="xMinYMid meet"'));
+  assert.ok(svg.includes("font-size:18px"));
   assert.ok(layout.systems[0].textRuns.some((run) => run.text === "-"));
   assert.ok(svg.includes(">ri-e<"));
   assert.equal(svg, svgAgain);
@@ -234,6 +241,69 @@ function testSyllabicPhraseHelpers() {
   assert.equal(validateChantDocument(doc).valid, true);
 }
 
+function testSyllabicPhraseBarAndTextOnly() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_helper_bar_text",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+  const phrase = createSyllabicPhrase(doc, {
+    voiceId: voice.id,
+    blockId: "tb_main",
+    words: [
+      {
+        id: "word_alleluia",
+        normalisedText: "Alleluia",
+        syllables: [
+          { text: "Al", spanId: "span_al", neumeId: "ng_al", eventId: "evt_al", pitch: -2 },
+          { text: "le", spanId: "span_le", music: "none" },
+          {
+            text: "lu",
+            spanId: "span_lu",
+            music: "bar",
+            eventId: "evt_lu_bar",
+            alignmentId: "aln_lu_bar",
+            kind: "quarter",
+            phraseStrength: "minor",
+          },
+          { text: "ia", spanId: "span_ia", neumeId: "ng_ia", eventId: "evt_ia", pitch: -1 },
+        ],
+      },
+    ],
+  });
+  const layout = layoutChant(doc, { width: 80 });
+  const textRuns = layout.systems[0].textRuns;
+  const semanticTextRuns = textRuns.filter((run) => run.semanticId?.startsWith("span_"));
+  const barGlyph = layout.systems[0].glyphs.find((glyph) => glyph.id === "lg_evt_lu_bar_bar");
+  const luRun = semanticTextRuns.find((run) => run.semanticId === "span_lu");
+  const leRun = semanticTextRuns.find((run) => run.semanticId === "span_le");
+  const leSyllable = layout.systems[0].syllables.find((syllable) => syllable.semanticTextSpanId === "span_le");
+
+  assert.equal(phrase.neumes.length, 2);
+  assert.equal(phrase.bars.length, 1);
+  assert.equal(phrase.alignments.length, 3);
+  assert.equal(phrase.words[0].syllablesWithMusic[2].bar.id, "evt_lu_bar");
+  assert.deepEqual(voice.eventIds, ["evt_al", "evt_lu_bar", "evt_ia"]);
+  assert.equal(doc.music.events.evt_lu_bar.kind, "quarter");
+  assert.equal(doc.music.events.evt_lu_bar.phraseStrength, "minor");
+  assert.equal(doc.alignment.links.aln_lu_bar.musicTargets[0].fromEventId, "evt_lu_bar");
+  assert.equal(doc.alignment.links.aln_lu_bar.relation, "editorialAssociation");
+  assert.deepEqual(doc.text.blocks[0].orderedSpanIds, ["span_al", "span_le", "span_lu", "span_ia"]);
+  assert.deepEqual(semanticTextRuns.map((run) => run.text), ["Al", "le", "lu", "ia"]);
+  assert.deepEqual(textRuns.map((run) => run.text), ["Al", "-", "le", "-", "lu", "-", "ia"]);
+  assert.ok(barGlyph);
+  assert.equal(barGlyph.defKey, "barQuarter");
+  assert.equal(barGlyph.y, 2);
+  assert.equal(barGlyph.height, 2);
+  assert.ok(luRun);
+  assert.equal(luRun.x, barGlyph.x + (barGlyph.width / 2));
+  assert.ok(leRun);
+  assert.ok(leSyllable);
+  assert.equal(leSyllable.anchorPolicy, "editorial");
+  assert.equal(validateChantDocument(doc).valid, true);
+}
+
 function testSyllabicPhraseMixedNeumeMelisma() {
   const { doc, voice } = createChantDocument({
     id: "doc_helper_mixed_melisma",
@@ -309,6 +379,53 @@ function testSyllabicPhraseMixedNeumeMelisma() {
   assert.equal(validateChantDocument(doc).valid, true);
 }
 
+function testPorrectusEndingVariants() {
+  const overlaps = [2, 3, 4].map((porrectusSize) => {
+    const layout = layoutPorrectusNeume(`podatus_${porrectusSize}`, [
+      -2,
+      -2 - porrectusSize,
+      -1 - porrectusSize,
+    ]);
+    const swash = layout.systems[0].glyphs.find((glyph) =>
+      glyph.id === `lg_note_podatus_${porrectusSize}_1_porrectus${porrectusSize}`);
+    const ending = layout.systems[0].glyphs.find((glyph) => glyph.id === `lg_note_podatus_${porrectusSize}_3`);
+    const startLine = layout.systems[0].glyphs.find((glyph) => glyph.classes.includes("porrectus-start-line"));
+    const endingConnector = layout.systems[0].glyphs.find((glyph) => glyph.classes.includes("porrectus-ending-connector"));
+
+    assert.ok(swash);
+    assert.ok(ending);
+    assert.ok(startLine);
+    assert.equal(startLine.defKey, "neumeConnectorLine");
+    assert.equal(endingConnector, undefined);
+    assert.equal(swash.defKey, `porrectus${porrectusSize}`);
+    assert.equal(ending.defKey, "podatusUpper");
+    assert.ok(ending.x < swash.x + swash.width);
+    assert.ok(ending.x > swash.x);
+
+    return (swash.x + swash.width) - ending.x;
+  });
+
+  assert.ok(overlaps.every((overlap) => overlap > 0));
+
+  const connectorLayout = layoutPorrectusNeume("connector", [-2, -5, -2]);
+  const connectorEnding = connectorLayout.systems[0].glyphs.find((glyph) => glyph.id === "lg_note_connector_3");
+  const startLine = connectorLayout.systems[0].glyphs.find((glyph) => glyph.classes.includes("porrectus-start-line"));
+  const connectorLine = connectorLayout.systems[0].glyphs.find((glyph) => glyph.classes.includes("porrectus-ending-connector"));
+  const hiddenSecondNote = connectorLayout.systems[0].glyphs.find((glyph) => glyph.id === "lg_note_connector_2_hidden");
+  const svg = renderSvg(connectorLayout);
+
+  assert.ok(connectorEnding);
+  assert.equal(connectorEnding.defKey, "podatusUpper");
+  assert.ok(startLine);
+  assert.equal(startLine.defKey, "neumeConnectorLine");
+  assert.ok(connectorLine);
+  assert.equal(connectorLine.defKey, "neumeConnectorLine");
+  assert.ok(connectorLine.height > 0);
+  assert.ok(svg.includes("neuma-neume-line"));
+  assert.ok(hiddenSecondNote);
+  assert.equal(hiddenSecondNote.defKey, "none");
+}
+
 function testMultiNeumeMelisma() {
   const doc = createMelismaDocument();
   const layout = layoutChant(doc, { width: 80 });
@@ -330,6 +447,29 @@ function testWriteSvgFile() {
 
   assert.equal(returned, expected);
   assert.equal(actual, expected);
+}
+
+function layoutPorrectusNeume(suffix, pitches) {
+  const { doc, voice } = createChantDocument({
+    id: `doc_porrectus_${suffix}`,
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+
+  createNeumeGroup(doc, {
+    id: `ng_${suffix}`,
+    eventId: `evt_${suffix}`,
+    voiceId: voice.id,
+    notes: pitches.map((pitch, index) => ({
+      id: `note_${suffix}_${index + 1}`,
+      pitch,
+    })),
+    contourKindHint: "porrectus",
+    notationHints: [{ key: "glyph", value: "porrectus" }],
+  });
+
+  return layoutChant(doc, { width: 80 });
 }
 
 function createUnderlaySpacingDocument(documentSuffix, neumes) {

@@ -141,6 +141,12 @@ export type SyllabicNeumeInput = CompactNoteInput | CompactNoteInput[] | {
   groupingRole?: NeumeGroupingRole;
 };
 
+export type SyllabicBarInput = true | BarKind | {
+  id?: Id;
+  kind?: BarKind;
+  phraseStrength?: PhraseStrength;
+};
+
 export type SyllabicSyllableInput = string | [text: string, notes: CompactNoteInput | CompactNoteInput[]] | {
   id?: Id;
   text: string;
@@ -154,6 +160,11 @@ export type SyllabicSyllableInput = string | [text: string, notes: CompactNoteIn
   sign?: NoteInputSign;
   notes?: CompactNoteInput[];
   neumes?: SyllabicNeumeInput[];
+  music?: "bar" | "none";
+  bar?: SyllabicBarInput;
+  kind?: BarKind;
+  barKind?: BarKind;
+  phraseStrength?: PhraseStrength;
   neumeId?: Id;
   eventId?: Id;
   noteIdPrefix?: string;
@@ -186,6 +197,7 @@ export type CreatedSyllabicPhraseSyllable = {
   span: TextSpan;
   neume?: CreatedNeumeGroup;
   neumes: CreatedNeumeGroup[];
+  bar?: BarEvent;
   alignment?: AlignmentLink;
 };
 
@@ -196,6 +208,7 @@ export type CreatedSyllabicPhraseWord = CreatedWordWithSyllables & {
 export type CreatedSyllabicPhrase = {
   words: CreatedSyllabicPhraseWord[];
   neumes: CreatedNeumeGroup[];
+  bars: BarEvent[];
   alignments: AlignmentLink[];
 };
 
@@ -393,6 +406,7 @@ export function createSyllabicPhrase(doc: ChantDocument, options: CreateSyllabic
 
   const words: CreatedSyllabicPhraseWord[] = [];
   const neumes: CreatedNeumeGroup[] = [];
+  const bars: BarEvent[] = [];
   const alignments: AlignmentLink[] = [];
 
   for (const wordInput of options.words) {
@@ -423,9 +437,15 @@ export function createSyllabicPhrase(doc: ChantDocument, options: CreateSyllabic
     normalizedWord.syllables.forEach((syllableInput, index) => {
       const span = createdWord.spans[index];
       const syllable = createdWord.syllables[index];
+      const barInput = barForSyllabicSyllable(syllableInput);
       const neumeInputs = neumesForSyllabicSyllable(syllableInput);
       const createdNeumes: CreatedNeumeGroup[] = [];
+      let bar: BarEvent | undefined;
       let alignment: AlignmentLink | undefined;
+
+      if (barInput !== undefined && hasSyllabicMusicInput(syllableInput)) {
+        throw new Error("createSyllabicPhrase syllables cannot create both neumes and a bar.");
+      }
 
       if (span !== undefined && neumeInputs.length > 0) {
         neumeInputs.forEach((neumeInput, neumeIndex) => {
@@ -466,12 +486,33 @@ export function createSyllabicPhrase(doc: ChantDocument, options: CreateSyllabic
         alignments.push(alignment);
       }
 
+      if (span !== undefined && barInput !== undefined) {
+        bar = addBar(doc, {
+          id: barInput.id,
+          voiceId: options.voiceId,
+          kind: barInput.kind,
+          phraseStrength: barInput.phraseStrength,
+        });
+        bars.push(bar);
+
+        alignment = attachTextToMusic(doc, {
+          id: syllableInput.alignmentId,
+          textSpanId: span.id,
+          musicTargets: [new MusicTarget(options.voiceId, bar.id)],
+          relation: syllableInput.relation ?? "editorialAssociation",
+          textDistribution: syllableInput.textDistribution ?? "singleSyllable",
+          musicDistribution: syllableInput.musicDistribution ?? "singleGroup",
+        });
+        alignments.push(alignment);
+      }
+
       if (span !== undefined && syllable !== undefined) {
         createdWord.syllablesWithMusic.push({
           syllable,
           span,
           neume: createdNeumes[0],
           neumes: createdNeumes,
+          bar,
           alignment,
         });
       }
@@ -480,7 +521,7 @@ export function createSyllabicPhrase(doc: ChantDocument, options: CreateSyllabic
     words.push(createdWord);
   }
 
-  return { words, neumes, alignments };
+  return { words, neumes, bars, alignments };
 }
 
 export function attachTextToMusic(doc: ChantDocument, options: AttachTextToMusicOptions): AlignmentLink {
@@ -576,6 +617,12 @@ type NormalizedSyllabicNeumeInput = {
   groupingRole?: NeumeGroupingRole;
 };
 
+type NormalizedSyllabicBarInput = {
+  id?: Id;
+  kind?: BarKind;
+  phraseStrength?: PhraseStrength;
+};
+
 type NormalizedSyllabicWordInput = {
   id?: Id;
   normalisedText?: string;
@@ -631,6 +678,10 @@ function notesForSyllabicSyllable(input: NormalizedSyllabicSyllableInput): NoteI
 }
 
 function neumesForSyllabicSyllable(input: NormalizedSyllabicSyllableInput): NormalizedSyllabicNeumeInput[] {
+  if (input.music === "none" || input.music === "bar" || input.bar !== undefined) {
+    return [];
+  }
+
   if (input.neumes !== undefined) {
     return input.neumes
       .map((neume) => normalizeSyllabicNeumeInput(neume))
@@ -651,6 +702,40 @@ function neumesForSyllabicSyllable(input: NormalizedSyllabicSyllableInput): Norm
     notationHints: input.notationHints,
     groupingRole: input.groupingRole,
   }];
+}
+
+function barForSyllabicSyllable(input: NormalizedSyllabicSyllableInput): NormalizedSyllabicBarInput | undefined {
+  if (input.music !== "bar" && input.bar === undefined && input.kind === undefined && input.barKind === undefined) {
+    return undefined;
+  }
+
+  if (input.bar === undefined || input.bar === true) {
+    return {
+      id: input.eventId,
+      kind: input.barKind ?? input.kind,
+      phraseStrength: input.phraseStrength,
+    };
+  }
+
+  if (typeof input.bar === "string") {
+    return {
+      id: input.eventId,
+      kind: input.bar,
+      phraseStrength: input.phraseStrength,
+    };
+  }
+
+  return {
+    id: input.bar.id ?? input.eventId,
+    kind: input.bar.kind ?? input.barKind ?? input.kind,
+    phraseStrength: input.bar.phraseStrength ?? input.phraseStrength,
+  };
+}
+
+function hasSyllabicMusicInput(input: NormalizedSyllabicSyllableInput): boolean {
+  return input.neumes !== undefined
+    || input.notes !== undefined
+    || input.pitch !== undefined;
 }
 
 function normalizeSyllabicNeumeInput(input: SyllabicNeumeInput): NormalizedSyllabicNeumeInput {

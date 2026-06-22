@@ -58,11 +58,12 @@ export function renderSvg(layout: LayoutDocument): string {
   const scale = layout.units.pxPerStaffSpace;
   const width = toPx(layout.viewport.width, scale);
   const height = toPx(layout.viewport.height, scale);
+  const lyricFontSize = toPx(layout.units.lyricTextSize, scale);
   const parts: string[] = [];
 
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${fmt(width)} ${fmt(height)}" width="${fmt(width)}" height="${fmt(height)}" data-layout-id="${escapeAttr(layout.layoutId)}" data-source-document-id="${escapeAttr(layout.sourceDocumentId)}">`);
   parts.push("<defs>");
-  parts.push("<style>.neuma-staff-line{stroke:#161616;stroke-linecap:square}.neuma-glyph{fill:#161616}.neuma-lyric{font-family:serif;font-size:12px;fill:#161616}.neuma-hit-box{fill:transparent;stroke:none;pointer-events:all}</style>");
+  parts.push(`<style>.neuma-staff-line{stroke:#161616;stroke-linecap:square}.neuma-glyph{fill:#161616}.neuma-lyric{font-family:serif;font-size:${fmt(lyricFontSize)}px;fill:#161616}.neuma-hit-box{fill:transparent;stroke:none;pointer-events:all}</style>`);
   for (const def of layout.defs) {
     parts.push(renderSymbol(def, scale));
   }
@@ -134,6 +135,10 @@ function renderSystem(system: LayoutSystem, scale: number, lineThickness: number
 }
 
 function renderGlyph(glyph: LayoutGlyph, scale: number, lineThickness: number): string {
+  if (glyph.kind === "neumeLine") {
+    return renderNeumeLine(glyph, scale);
+  }
+
   if (glyph.kind === "barline") {
     return renderBarline(glyph, scale, lineThickness);
   }
@@ -152,6 +157,24 @@ function renderGlyph(glyph: LayoutGlyph, scale: number, lineThickness: number): 
   return parts.join("");
 }
 
+function renderNeumeLine(glyph: LayoutGlyph, scale: number): string {
+  const classes = ["neuma-neume-line", ...glyph.classes].join(" ");
+  const semanticAttr = glyph.semanticId === undefined ? "" : ` data-semantic-id="${escapeAttr(glyph.semanticId)}"`;
+  const x = fmt(toPx(glyph.x, scale));
+  const y1 = fmt(toPx(glyph.y, scale));
+  const y2 = fmt(toPx(glyph.y + glyph.height, scale));
+  const strokeWidth = fmt(toPx(glyph.width, scale));
+  const parts = [
+    `<line id="${escapeAttr(glyph.id)}" class="${escapeAttr(classes)}"${semanticAttr} x1="${x}" y1="${y1}" x2="${x}" y2="${y2}" stroke="#161616" stroke-width="${strokeWidth}" stroke-linecap="square"/>`,
+  ];
+
+  if (glyph.hitBox !== undefined) {
+    parts.push(renderHitBox(`${glyph.id}_hit`, glyph.hitBox, scale, glyph.semanticId));
+  }
+
+  return parts.join("");
+}
+
 function renderBarline(glyph: LayoutGlyph, scale: number, lineThickness: number): string {
   const classes = ["neuma-barline", ...glyph.classes].join(" ");
   const semanticAttr = glyph.semanticId === undefined ? "" : ` data-semantic-id="${escapeAttr(glyph.semanticId)}"`;
@@ -159,7 +182,7 @@ function renderBarline(glyph: LayoutGlyph, scale: number, lineThickness: number)
   const y1 = fmt(toPx(glyph.y, scale));
   const y2 = fmt(toPx(glyph.y + glyph.height, scale));
   const x = toPx(glyph.x, scale);
-  const gap = toPx(0.35, scale);
+  const gap = toPx(glyph.width, scale);
   const xs = glyph.defKey === "barDouble" || glyph.defKey === "barFinal"
     ? [x, x + gap]
     : [x];

@@ -20,6 +20,7 @@ export type LayoutGlyphKind =
   | "mora"
   | "ictus"
   | "brace"
+  | "neumeLine"
   | "editorialMark"
   | "selection"
   | "handle";
@@ -46,6 +47,7 @@ export type LayoutUnits = {
   value: 1;
   pxPerStaffSpace: number;
   lineThickness: number;
+  lyricTextSize: number;
 };
 
 export type LayoutGlyphDef = {
@@ -233,8 +235,16 @@ type LayoutContext = {
   semanticToLayoutIds: Record<Id, Id[]>;
   textSpanToNeumeIds: Record<Id, Id[]>;
   textSpanRelations: Record<Id, AlignmentRelation>;
+  textSpanAnchors: Record<Id, LayoutTextSpanAnchor[]>;
   glyphs: LayoutGlyph[];
   neumes: LayoutNeume[];
+};
+
+type LayoutTextSpanAnchor = {
+  x: number;
+  spanStart: number;
+  spanEnd: number;
+  relation: AlignmentRelation;
 };
 
 type LayoutNoteInput = {
@@ -248,21 +258,36 @@ type LayoutNoteInput = {
 };
 
 const VERSION = "0.1.0";
-const LINE_THICKNESS = 0.08;
+const EXSURGE_PUNCTUM_WIDTH = 100;
+const LINE_THICKNESS = 0.16;
 const STAFF_TOP = 3;
 const STAFF_LEFT = 4;
 const SYSTEM_MARGIN = 2;
-const LYRIC_BASELINE_OFFSET = 5;
+const STAFF_LINE_INTERVAL = 2;
+const STAFF_STEP_INTERVAL = STAFF_LINE_INTERVAL / 2;
+const STAFF_HEIGHT = STAFF_LINE_INTERVAL * 3;
+const LYRIC_BASELINE_BELOW_STAFF = 2;
 const LYRIC_NEUME_CLEARANCE = 0.35;
-const TEXT_HEIGHT = 1;
-const NOTE_WIDTH = 0.8;
-const NOTE_HEIGHT = 0.8;
+const LYRIC_TEXT_SIZE = 1.8;
+const LYRIC_TEXT_WIDTH_PER_CHARACTER = 0.48;
+const NOTE_WIDTH = 1;
+const NOTE_HEIGHT = exsurgeGlyphSize(100, 123.43799591064453).height;
 const NOTE_GAP = 0.75;
-const PORRECTUS_ENDING_OVERLAP = NOTE_WIDTH * 0.9;
-const MORA_SIZE = 0.35;
+const PORRECTUS_ENDING_OVERLAPS: Record<Id, number> = {
+  porrectus1: NOTE_WIDTH * 0.9,
+  porrectus2: NOTE_WIDTH * 1.35,
+  porrectus3: NOTE_WIDTH * 1.73,
+  porrectus4: NOTE_WIDTH * 1.73,
+};
+const NEUME_CONNECTOR_LINE_WIDTH = LINE_THICKNESS;
+const PORRECTUS_START_LINE_X_OFFSET = 0;
+const PORRECTUS_CONNECTOR_MIN_INTERVAL_STEPS = 2;
+const PORRECTUS_CONNECTOR_X_OFFSET = 0.55;
+const MORA_SIZE = exsurgeGlyphSize(48, 48).width;
 const MORA_GAP = 0.15;
-const NEUME_GAP = 1.8;
+const NEUME_GAP = 1.2;
 const BAR_GAP = 1.2;
+const TEXT_ONLY_GAP = 1.2;
 
 export function layoutChant(document: ChantDocument, options: LayoutOptions): LayoutDocument {
   const width = options.width;
@@ -278,11 +303,12 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
   const systemId = "sys_1";
   const layoutStaffId = primaryStaff === undefined ? "lst_missing_staff" : `lst_${safeId(primaryStaff.id)}`;
   const staffWidth = Math.max(0, width - STAFF_LEFT - SYSTEM_MARGIN);
-  const lineYs = [0, 1, 2, 3].map((offset) => STAFF_TOP + offset);
+  const lineYs = [0, 1, 2, 3].map((offset) => STAFF_TOP + (offset * STAFF_LINE_INTERVAL));
   const glyphs: LayoutGlyph[] = [];
   const neumes: LayoutNeume[] = [];
   const textSpanToNeumeIds: Record<Id, Id[]> = {};
   const textSpanRelations: Record<Id, AlignmentRelation> = {};
+  const textSpanAnchors: Record<Id, LayoutTextSpanAnchor[]> = {};
 
   if (primaryStaff === undefined || primaryVoice === undefined) {
     diagnostics.push({
@@ -300,6 +326,7 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
     semanticToLayoutIds,
     textSpanToNeumeIds,
     textSpanRelations,
+    textSpanAnchors,
     glyphs,
     neumes,
   };
@@ -365,22 +392,35 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
 
       if (entry.event instanceof BarEvent) {
         const barGlyphId = `lg_${safeId(entry.eventId)}_bar`;
+        const barDef = barDefKey(entry.event.kind);
+        const barSize = glyphSizeForDef(barDef);
         const barGlyph = makeGlyph({
           id: barGlyphId,
           semanticId: entry.eventId,
           systemId,
           staffId: layoutStaffId,
-          defKey: barDefKey(entry.event.kind),
+          defKey: barDef,
           kind: "barline",
           x,
-          y: STAFF_TOP,
-          width: entry.event.kind === "double" || entry.event.kind === "final" ? 0.35 : LINE_THICKNESS,
-          height: 3,
+          y: barY(barDef),
+          width: barSize.width,
+          height: barSize.height,
           zIndex: 2,
           classes: ["barline", `barline-${entry.event.kind}`],
         });
         glyphs.push(barGlyph);
         addIndex(semanticToLayoutIds, entry.eventId, barGlyph.id);
+
+        for (const text of getTextForEvent(document, primaryVoice.id, entry.eventId)) {
+          addTextSpanAnchor(context, text.link.textSpanId, {
+            x: x + (barGlyph.width / 2),
+            spanStart: x,
+            spanEnd: x + barGlyph.width,
+            relation: text.link.relation,
+          });
+          addIndex(semanticToLayoutIds, text.link.textSpanId, barGlyph.id);
+        }
+
         pendingClefX = x;
         x += BAR_GAP;
       }
@@ -388,10 +428,10 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
   }
 
   const lyricBaselineY = lyricBaselineForNeumes(neumes);
-  const syllables = layoutSyllables(document, systemId, textSpanToNeumeIds, textSpanRelations, neumes, lyricBaselineY, textSpanToSyllableIds, semanticToLayoutIds);
+  const syllables = layoutSyllables(document, systemId, textSpanToNeumeIds, textSpanRelations, textSpanAnchors, neumes, lyricBaselineY, textSpanToSyllableIds, semanticToLayoutIds);
   const textRuns = layoutLyricTextRuns(document, systemId, syllables);
   const height = Math.max(
-    STAFF_TOP + LYRIC_BASELINE_OFFSET,
+    defaultLyricBaseline(),
     ...syllables.map((syllable) => syllable.baselineY),
   ) + 2;
   const layoutStaff: LayoutStaff = {
@@ -417,7 +457,7 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
     index: 0,
     rect: { x: 0, y: 0, width, height },
     contentRect: { x: SYSTEM_MARGIN, y: SYSTEM_MARGIN, width: Math.max(0, width - (SYSTEM_MARGIN * 2)), height: height - SYSTEM_MARGIN },
-    staffSpace: 1,
+    staffSpace: STAFF_LINE_INTERVAL,
     staffs: [layoutStaff],
     neumes,
     syllables,
@@ -442,6 +482,7 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
       value: 1,
       pxPerStaffSpace,
       lineThickness: LINE_THICKNESS,
+      lyricTextSize: LYRIC_TEXT_SIZE,
     },
     viewport: {
       width,
@@ -548,6 +589,12 @@ function layoutNeumeGroup(
   for (const textSpanId of textSpanIds) {
     addIndex(context.textSpanToNeumeIds, textSpanId, neume.id);
     context.textSpanRelations[textSpanId] = relation;
+    addTextSpanAnchor(context, textSpanId, {
+      x: anchor.x,
+      spanStart: rect.x,
+      spanEnd: rect.x + rect.width,
+      relation,
+    });
     addIndex(context.semanticToLayoutIds, textSpanId, neume.id);
   }
 
@@ -583,12 +630,40 @@ type LayoutPorrectusNeumeGroupOptions = {
   swashDefKey: Id;
 };
 
+type LayoutPorrectusConnectorLineOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  second: LayoutNoteInput;
+  third: LayoutNoteInput;
+  clef: ClefDef | undefined;
+  x: number;
+  secondY: number;
+  thirdY: number;
+  glyphIds: Id[];
+  boxes: Rect[];
+};
+
+type LayoutPorrectusStartLineOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  first: LayoutNoteInput;
+  second: LayoutNoteInput;
+  x: number;
+  firstY: number;
+  secondY: number;
+  glyphIds: Id[];
+  boxes: Rect[];
+};
+
 function layoutPorrectusNeumeGroup(options: LayoutPorrectusNeumeGroupOptions): void {
   const [first, second, third] = options.notes;
   const firstY = noteCenterY(options.context, first, options.clef);
   const secondY = noteCenterY(options.context, second, options.clef);
   const thirdY = noteCenterY(options.context, third, options.clef);
   const swashSize = glyphSizeForDef(options.swashDefKey);
+  const endingDefKey = porrectusEndingDefKey(third);
+  const endingOverlap = porrectusEndingOverlap(options.swashDefKey, endingDefKey);
+  const endingX = options.x + Math.max(0, swashSize.width - endingOverlap);
   const swashGlyphId = `lg_${safeId(first.id)}_${safeId(options.swashDefKey)}`;
   const swashGlyph = makeGlyph({
     id: swashGlyphId,
@@ -615,6 +690,18 @@ function layoutPorrectusNeumeGroup(options: LayoutPorrectusNeumeGroupOptions): v
     y: secondY,
   });
 
+  layoutPorrectusStartLine({
+    context: options.context,
+    neumeGroupId: options.neumeGroupId,
+    first,
+    second,
+    x: options.x + PORRECTUS_START_LINE_X_OFFSET,
+    firstY,
+    secondY: secondY + (NOTE_HEIGHT* 0.8),
+    glyphIds: options.glyphIds,
+    boxes: options.boxes,
+  });
+
   options.glyphIds.push(swashGlyph.id, hiddenSecondGlyph.id);
   options.noteEventIds.push(first.id, second.id);
   options.boxes.push(swashGlyph.hitBox ?? swashGlyph);
@@ -633,13 +720,26 @@ function layoutPorrectusNeumeGroup(options: LayoutPorrectusNeumeGroupOptions): v
     boxes: options.boxes,
   });
 
+  layoutPorrectusConnectorLine({
+    context: options.context,
+    neumeGroupId: options.neumeGroupId,
+    second,
+    third,
+    clef: options.clef,
+    x: endingX + PORRECTUS_CONNECTOR_X_OFFSET,
+    secondY,
+    thirdY,
+    glyphIds: options.glyphIds,
+    boxes: options.boxes,
+  });
+
   layoutVisibleNoteGlyph({
     context: options.context,
     neumeGroupId: options.neumeGroupId,
     note: third,
-    x: options.x + Math.max(0, swashSize.width - PORRECTUS_ENDING_OVERLAP),
+    x: endingX,
     y: thirdY,
-    defKey: porrectusEndingDefKey(third),
+    defKey: endingDefKey,
     kind: noteKind(third.sign),
     classes: ["note", "note-porrectus-ending", `note-${third.sign}`],
     glyphIds: options.glyphIds,
@@ -648,8 +748,69 @@ function layoutPorrectusNeumeGroup(options: LayoutPorrectusNeumeGroupOptions): v
   });
 }
 
+function layoutPorrectusStartLine(options: LayoutPorrectusStartLineOptions): void {
+  const y = Math.min(options.firstY, options.secondY);
+  const height = Math.abs(options.secondY - options.firstY);
+  if (height === 0) {
+    return;
+  }
+
+  const line = makeGlyph({
+    id: `lg_${safeId(options.second.id)}_${safeId(options.first.id)}_start_connector`,
+    semanticId: options.neumeGroupId,
+    parentId: `ln_${safeId(options.neumeGroupId)}`,
+    systemId: options.context.systemId,
+    staffId: options.context.staffId,
+    defKey: "neumeConnectorLine",
+    kind: "neumeLine",
+    x: options.x,
+    y,
+    width: NEUME_CONNECTOR_LINE_WIDTH,
+    height,
+    zIndex: 2,
+    classes: ["neume-line", "porrectus-start-line"],
+  });
+
+  options.glyphIds.push(line.id);
+  options.boxes.push(line.hitBox ?? line);
+  options.context.glyphs.push(line);
+}
+
+function layoutPorrectusConnectorLine(options: LayoutPorrectusConnectorLineOptions): void {
+  if (porrectusSecondToThirdIntervalSteps(options.second, options.third, options.clef) < PORRECTUS_CONNECTOR_MIN_INTERVAL_STEPS) {
+    return;
+  }
+
+  const y = Math.min(options.secondY, options.thirdY);
+  const height = Math.abs(options.thirdY - options.secondY);
+  if (height === 0) {
+    return;
+  }
+
+  const line = makeGlyph({
+    id: `lg_${safeId(options.second.id)}_${safeId(options.third.id)}_connector`,
+    semanticId: options.neumeGroupId,
+    parentId: `ln_${safeId(options.neumeGroupId)}`,
+    systemId: options.context.systemId,
+    staffId: options.context.staffId,
+    defKey: "neumeConnectorLine",
+    kind: "neumeLine",
+    x: options.x,
+    y,
+    width: NEUME_CONNECTOR_LINE_WIDTH,
+    height,
+    zIndex: 2,
+    classes: ["neume-line", "porrectus-ending-connector"],
+  });
+
+  options.glyphIds.push(line.id);
+  options.boxes.push(line.hitBox ?? line);
+  options.context.glyphs.push(line);
+}
+
 function layoutVisibleNoteGlyph(options: LayoutVisibleNoteGlyphOptions): void {
   const glyphId = options.glyphId ?? `lg_${safeId(options.note.id)}`;
+  const glyphSize = glyphSizeForDef(options.defKey);
   const glyph = makeGlyph({
     id: glyphId,
     semanticId: options.note.id,
@@ -659,9 +820,9 @@ function layoutVisibleNoteGlyph(options: LayoutVisibleNoteGlyphOptions): void {
     defKey: options.defKey,
     kind: options.kind,
     x: options.x,
-    y: options.y - (NOTE_HEIGHT / 2),
-    width: NOTE_WIDTH,
-    height: NOTE_HEIGHT,
+    y: options.y - (glyphSize.height / 2),
+    width: glyphSize.width,
+    height: glyphSize.height,
     zIndex: 3,
     classes: options.classes,
   });
@@ -735,8 +896,8 @@ function makeLogicalGlyph(glyph: Omit<LayoutGlyph, "classes" | "defKey" | "heigh
 
 function noteCenterY(context: LayoutContext, note: LayoutNoteInput, clef: ClefDef | undefined): number {
   return clef === undefined
-    ? STAFF_TOP + 1.5
-    : context.lineYs[0] + (getStaffPosition(note.pitch, clef, 4).staffStep * 0.5);
+    ? STAFF_TOP + (STAFF_HEIGHT / 2)
+    : context.lineYs[0] + (getStaffPosition(note.pitch, clef, 4).staffStep * STAFF_STEP_INTERVAL);
 }
 
 function layoutSyllables(
@@ -744,32 +905,39 @@ function layoutSyllables(
   systemId: Id,
   textSpanToNeumeIds: Record<Id, Id[]>,
   textSpanRelations: Record<Id, AlignmentRelation>,
+  textSpanAnchors: Record<Id, LayoutTextSpanAnchor[]>,
   neumes: LayoutNeume[],
   baselineY: number,
   textSpanToSyllableIds: Record<Id, Id[]>,
   semanticToLayoutIds: Record<Id, Id[]>,
 ): LayoutSyllable[] {
   const neumeById = Object.fromEntries(neumes.map((neume) => [neume.id, neume]));
-  return Object.keys(textSpanToNeumeIds).sort((left, right) => {
-    const leftX = neumeById[textSpanToNeumeIds[left][0]]?.anchor.x ?? 0;
-    const rightX = neumeById[textSpanToNeumeIds[right][0]]?.anchor.x ?? 0;
-    return leftX - rightX || left.localeCompare(right);
-  }).map((textSpanId) => {
-    const attachedNeumeIds = unique(textSpanToNeumeIds[textSpanId]);
+  const textSpanIds = layoutTextSpanOrder(document, textSpanAnchors, textSpanToNeumeIds);
+  const explicitAnchors: Record<Id, LayoutTextSpanAnchor> = {};
+
+  for (const textSpanId of textSpanIds) {
+    const anchor = explicitTextSpanAnchor(textSpanAnchors[textSpanId]);
+    if (anchor !== undefined) {
+      explicitAnchors[textSpanId] = anchor;
+    }
+  }
+
+  return textSpanIds.map((textSpanId, index) => {
+    const attachedNeumeIds = unique(textSpanToNeumeIds[textSpanId] ?? []);
     const attachedNeumes = attachedNeumeIds.flatMap((neumeId) => {
       const neume = neumeById[neumeId];
       return neume === undefined ? [] : [neume];
     });
     const firstNeume = attachedNeumes[0];
+    const anchor = anchorForTextSpan(textSpanId, index, textSpanIds, explicitAnchors);
     const span = document.text.spans[textSpanId];
     const firstSyllable = span?.syllableIds[0] === undefined ? undefined : document.text.syllables[span.syllableIds[0]];
     const text = getHyphenatedTextForSpan(document, textSpanId);
     const textWidth = measureText(text);
-    const spanStart = Math.min(...attachedNeumes.map((neume) => neume.textAttachment.visualSpanX1));
-    const spanEnd = Math.max(...attachedNeumes.map((neume) => neume.textAttachment.visualSpanX2));
-    const relation = textSpanRelations[textSpanId] ?? "syllabic";
-    const hasMelisma = relation === "melisma" || attachedNeumes.length > 1 || (firstNeume?.noteEventIds.length ?? 0) > 1;
-    const anchorX = firstNeume?.anchor.x ?? spanStart;
+    const relation = textSpanRelations[textSpanId] ?? anchor.relation;
+    const hasMelisma = attachedNeumes.length > 0
+      && (relation === "melisma" || attachedNeumes.length > 1 || (firstNeume?.noteEventIds.length ?? 0) > 1);
+    const anchorX = anchor.x;
     const syllableId = `ls_${safeId(textSpanId)}`;
     const lyricRunId = `txt_${safeId(textSpanId)}`;
     const syllable: LayoutSyllable = {
@@ -781,14 +949,14 @@ function layoutSyllables(
       attachedNeumeIds,
       bounds: {
         x: anchorX - (textWidth / 2),
-        y: baselineY - TEXT_HEIGHT,
+        y: baselineY - LYRIC_TEXT_SIZE,
         width: textWidth,
-        height: TEXT_HEIGHT,
+        height: LYRIC_TEXT_SIZE,
       },
       baselineY,
-      anchorPolicy: hasMelisma ? "firstPrincipalNote" : "vowelCentre",
+      anchorPolicy: attachedNeumes.length === 0 ? "editorial" : hasMelisma ? "firstPrincipalNote" : "vowelCentre",
       anchorX,
-      melismaExtent: hasMelisma ? { startX: spanStart, endX: spanEnd } : undefined,
+      melismaExtent: hasMelisma ? { startX: anchor.spanStart, endX: anchor.spanEnd } : undefined,
       continuation: {
         softHyphenBefore: false,
         softHyphenAfter: false,
@@ -800,18 +968,98 @@ function layoutSyllables(
     textSpanToSyllableIds[textSpanId] = [syllable.id];
     addIndex(semanticToLayoutIds, textSpanId, syllable.id);
     return syllable;
-  });
+  }).sort((left, right) => left.anchorX - right.anchorX || left.id.localeCompare(right.id));
+}
+
+function layoutTextSpanOrder(
+  document: ChantDocument,
+  textSpanAnchors: Record<Id, LayoutTextSpanAnchor[]>,
+  textSpanToNeumeIds: Record<Id, Id[]>,
+): Id[] {
+  const orderedChantTextSpanIds = document.text.blocks
+    .filter((block) => block.kind === "chantText")
+    .flatMap((block) => block.orderedSpanIds)
+    .filter((textSpanId) => document.text.spans[textSpanId] !== undefined && getHyphenatedTextForSpan(document, textSpanId) !== "");
+  const anchoredTextSpanIds = Object.keys({
+    ...textSpanToNeumeIds,
+    ...textSpanAnchors,
+  }).filter((textSpanId) => document.text.spans[textSpanId] !== undefined);
+
+  return unique([...orderedChantTextSpanIds, ...anchoredTextSpanIds]);
+}
+
+function explicitTextSpanAnchor(anchors: LayoutTextSpanAnchor[] | undefined): LayoutTextSpanAnchor | undefined {
+  if (anchors === undefined || anchors.length === 0) {
+    return undefined;
+  }
+
+  return {
+    x: anchors[0].x,
+    spanStart: Math.min(...anchors.map((anchor) => anchor.spanStart)),
+    spanEnd: Math.max(...anchors.map((anchor) => anchor.spanEnd)),
+    relation: anchors[0].relation,
+  };
+}
+
+function anchorForTextSpan(
+  textSpanId: Id,
+  index: number,
+  textSpanIds: Id[],
+  explicitAnchors: Record<Id, LayoutTextSpanAnchor>,
+): LayoutTextSpanAnchor {
+  const explicitAnchor = explicitAnchors[textSpanId];
+  if (explicitAnchor !== undefined) {
+    return explicitAnchor;
+  }
+
+  const previousIndex = findAnchoredTextSpanIndex(textSpanIds, explicitAnchors, index, -1);
+  const nextIndex = findAnchoredTextSpanIndex(textSpanIds, explicitAnchors, index, 1);
+  const previousAnchor = previousIndex === undefined ? undefined : explicitAnchors[textSpanIds[previousIndex]];
+  const nextAnchor = nextIndex === undefined ? undefined : explicitAnchors[textSpanIds[nextIndex]];
+  let x: number;
+
+  if (previousAnchor !== undefined && nextAnchor !== undefined && previousIndex !== undefined && nextIndex !== undefined) {
+    x = previousAnchor.x + ((nextAnchor.x - previousAnchor.x) * ((index - previousIndex) / (nextIndex - previousIndex)));
+  } else if (previousAnchor !== undefined && previousIndex !== undefined) {
+    x = previousAnchor.x + ((index - previousIndex) * TEXT_ONLY_GAP);
+  } else if (nextAnchor !== undefined && nextIndex !== undefined) {
+    x = nextAnchor.x - ((nextIndex - index) * TEXT_ONLY_GAP);
+  } else {
+    x = STAFF_LEFT + 2.4 + (index * TEXT_ONLY_GAP);
+  }
+
+  return {
+    x,
+    spanStart: x,
+    spanEnd: x,
+    relation: "editorialAssociation",
+  };
+}
+
+function findAnchoredTextSpanIndex(
+  textSpanIds: Id[],
+  explicitAnchors: Record<Id, LayoutTextSpanAnchor>,
+  fromIndex: number,
+  direction: -1 | 1,
+): number | undefined {
+  for (let index = fromIndex + direction; index >= 0 && index < textSpanIds.length; index += direction) {
+    if (explicitAnchors[textSpanIds[index]] !== undefined) {
+      return index;
+    }
+  }
+
+  return undefined;
 }
 
 function lyricBaselineForNeumes(neumes: LayoutNeume[]): number {
-  const defaultBaseline = STAFF_TOP + LYRIC_BASELINE_OFFSET;
+  const defaultBaseline = defaultLyricBaseline();
 
   if (neumes.length === 0) {
     return defaultBaseline;
   }
 
   const lowestNeumeBottom = Math.max(...neumes.map((neume) => neume.rect.y + neume.rect.height));
-  return Math.max(defaultBaseline, lowestNeumeBottom + TEXT_HEIGHT + LYRIC_NEUME_CLEARANCE);
+  return Math.max(defaultBaseline, lowestNeumeBottom + LYRIC_TEXT_SIZE + LYRIC_NEUME_CLEARANCE);
 }
 
 function layoutLyricTextRuns(document: ChantDocument, systemId: Id, syllables: LayoutSyllable[]): LayoutTextRun[] {
@@ -847,7 +1095,7 @@ function layoutLyricTextRuns(document: ChantDocument, systemId: Id, syllables: L
       x,
       y: left.baselineY,
       width: measureText("-"),
-      height: TEXT_HEIGHT,
+      height: LYRIC_TEXT_SIZE,
       baselineY: left.baselineY,
       align: "centre",
       fontKey: "lyricMain",
@@ -958,18 +1206,20 @@ function lastSyllableIndexForSpan(document: ChantDocument, syllableIds: Id[], te
 function makeClefGlyph(id: Id, semanticId: Id, systemId: Id, staffId: Id, x: number, clef?: ClefDef): LayoutGlyph {
   const line = clef?.line ?? 3;
   const staffLine = Math.min(4, Math.max(1, line));
-  const lineY = STAFF_TOP + (4 - staffLine);
+  const lineY = STAFF_TOP + ((4 - staffLine) * STAFF_LINE_INTERVAL);
+  const defKey = clef?.shape === "f" ? "clefF" : "clefC";
+  const glyphSize = glyphSizeForDef(defKey);
   return makeGlyph({
     id,
     semanticId,
     systemId,
     staffId,
-    defKey: clef?.shape === "f" ? "clefF" : "clefC",
+    defKey,
     kind: "clef",
     x,
-    y: lineY - 1,
-    width: 1.3,
-    height: 2,
+    y: lineY - (glyphSize.height / 2),
+    width: glyphSize.width,
+    height: glyphSize.height,
     zIndex: 2,
     classes: ["clef", `clef-${clef?.shape ?? "c"}`],
   });
@@ -991,39 +1241,55 @@ function makeGlyph(glyph: Omit<LayoutGlyph, "hitBox" | "reusable">): LayoutGlyph
 function defaultGlyphDefs(): LayoutGlyphDef[] {
   return [
     glyphDef("none", 0, 0),
-    glyphDef("punctum", 0.8, 0.8),
-    glyphDef("quilisma", 0.8, 0.8),
-    glyphDef("inclinatum", 0.8, 0.8),
-    glyphDef("liquescentAscending", 0.8, 1),
-    glyphDef("liquescentDescending", 0.8, 1),
-    glyphDef("oriscusAscending", 0.8, 0.8),
-    glyphDef("oriscusDescending", 0.8, 0.8),
-    glyphDef("virgaLong", 0.8, 2.2),
-    glyphDef("virgaShort", 0.8, 1.7),
-    glyphDef("apostropha", 0.8, 0.9),
-    glyphDef("podatusLower", 0.8, 0.8),
-    glyphDef("podatusUpper", 0.8, 0.8),
-    glyphDef("porrectus1", 2.4, 1.6),
-    glyphDef("porrectus2", 2.8, 2),
-    glyphDef("porrectus3", 3, 2.5),
-    glyphDef("porrectus4", 3.2, 3),
-    glyphDef("mora", 0.35, 0.35),
-    glyphDef("verticalEpisemaAbove", 0.2, 0.6),
-    glyphDef("verticalEpisemaBelow", 0.2, 0.6),
-    glyphDef("flat", 0.6, 1.7),
-    glyphDef("natural", 0.6, 1.7),
-    glyphDef("custosLong", 0.4, 2.2),
-    glyphDef("custosShort", 0.4, 1.7),
-    glyphDef("custosDescLong", 0.4, 2.2),
-    glyphDef("custosDescShort", 0.4, 1.7),
-    glyphDef("clefC", 1.3, 2),
-    glyphDef("clefF", 1.3, 2),
-    glyphDef("barQuarter", LINE_THICKNESS, 1.5),
-    glyphDef("barHalf", LINE_THICKNESS, 2),
-    glyphDef("barFull", LINE_THICKNESS, 3),
-    glyphDef("barDouble", 0.35, 3),
-    glyphDef("barFinal", 0.35, 3),
+    exsurgeGlyphDef("punctum", 100, 123.43799591064453),
+    exsurgeGlyphDef("quilisma", 100, 150),
+    exsurgeGlyphDef("inclinatum", 100, 150.77999877929688),
+    exsurgeGlyphDef("liquescentAscending", 100, 152.343994140625),
+    exsurgeGlyphDef("liquescentDescending", 100, 151.56199645996094),
+    exsurgeGlyphDef("oriscusAscending", 100, 147.656005859375),
+    exsurgeGlyphDef("oriscusDescending", 100, 147.656005859375),
+    exsurgeGlyphDef("virgaLong", 100, 326.56201171875),
+    exsurgeGlyphDef("virgaShort", 100, 253.12600708007812),
+    exsurgeGlyphDef("apostropha", 97.65699768066406, 151.56201171875),
+    exsurgeGlyphDef("podatusLower", 100, 103.12399291992188),
+    exsurgeGlyphDef("podatusUpper", 91.406005859375, 125.78099822998047),
+    exsurgeGlyphDef("porrectus1", 302.343994140625, 215.6269989013672),
+    exsurgeGlyphDef("porrectus2", 377.3429870605469, 328.1260070800781),
+    exsurgeGlyphDef("porrectus3", 377.343994140625, 427.3450012207031),
+    exsurgeGlyphDef("porrectus4", 420, 525.780029296875),
+    exsurgeGlyphDef("mora", 48, 48),
+    exsurgeGlyphDef("verticalEpisemaAbove", 16, 80),
+    exsurgeGlyphDef("verticalEpisemaBelow", 16, 80),
+    exsurgeGlyphDef("flat", 97.91699981689453, 267.968994140625),
+    exsurgeGlyphDef("natural", 70.31100463867188, 330.468994140625),
+    exsurgeGlyphDef("custosLong", 46.35300064086914, 339.5820007324219),
+    exsurgeGlyphDef("custosShort", 43.75, 270.052001953125),
+    exsurgeGlyphDef("custosDescLong", 46.35300064086914, 339.58197021484375),
+    exsurgeGlyphDef("custosDescShort", 43.75, 270.0530090332031),
+    exsurgeGlyphDef("clefC", 100, 331.2510070800781),
+    exsurgeGlyphDef("clefF", 193.75201416015625, 333.5950012207031),
+    glyphDef("barQuarter", LINE_THICKNESS, STAFF_LINE_INTERVAL),
+    glyphDef("barHalf", LINE_THICKNESS, STAFF_LINE_INTERVAL * 2),
+    glyphDef("barFull", LINE_THICKNESS, STAFF_HEIGHT),
+    glyphDef("barDouble", STAFF_STEP_INTERVAL, STAFF_HEIGHT),
+    glyphDef("barFinal", STAFF_STEP_INTERVAL, STAFF_HEIGHT),
   ];
+}
+
+function defaultLyricBaseline(): number {
+  return STAFF_TOP + STAFF_HEIGHT + LYRIC_BASELINE_BELOW_STAFF;
+}
+
+function exsurgeGlyphDef(key: Id, width: number, height: number): LayoutGlyphDef {
+  const size = exsurgeGlyphSize(width, height);
+  return glyphDef(key, size.width, size.height);
+}
+
+function exsurgeGlyphSize(width: number, height: number): Pick<Rect, "width" | "height"> {
+  return {
+    width: width / EXSURGE_PUNCTUM_WIDTH,
+    height: height / EXSURGE_PUNCTUM_WIDTH,
+  };
 }
 
 function glyphDef(key: Id, width: number, height: number): LayoutGlyphDef {
@@ -1114,15 +1380,34 @@ function isPorrectusNeume(neumeGroup: NeumeGroup): boolean {
     || glyphHint === "porrectus4";
 }
 
-function porrectusEndingDefKey(note: LayoutNoteInput): Id {
-  switch (note.sign) {
-    case "liquescentAscending":
-      return "liquescentAscending";
-    case "liquescentDescending":
-      return "liquescentDescending";
-    default:
-      return "podatusUpper";
+function porrectusEndingDefKey(third: LayoutNoteInput): Id {
+  if (third.sign === "liquescentAscending") {
+    return "liquescentAscending";
   }
+
+  if (third.sign === "liquescentDescending") {
+    return "liquescentDescending";
+  }
+
+  return "podatusUpper";
+}
+
+function porrectusEndingOverlap(swashDefKey: Id, endingDefKey: Id): number {
+  return PORRECTUS_ENDING_OVERLAPS[swashDefKey] ?? NOTE_WIDTH;
+}
+
+function porrectusSecondToThirdIntervalSteps(
+  second: LayoutNoteInput,
+  third: LayoutNoteInput,
+  clef: ClefDef | undefined,
+): number {
+  if (clef === undefined) {
+    return 0;
+  }
+
+  const secondStaffStep = getStaffPosition(second.pitch, clef, 4).staffStep;
+  const thirdStaffStep = getStaffPosition(third.pitch, clef, 4).staffStep;
+  return Math.abs(secondStaffStep - thirdStaffStep);
 }
 
 function glyphSizeForDef(defKey: Id): Pick<Rect, "width" | "height"> {
@@ -1166,6 +1451,17 @@ function barDefKey(kind: string): Id {
   }
 }
 
+function barY(defKey: Id): number {
+  switch (defKey) {
+    case "barQuarter":
+      return STAFF_TOP - STAFF_STEP_INTERVAL;
+    case "barHalf":
+      return STAFF_TOP + STAFF_STEP_INTERVAL;
+    default:
+      return STAFF_TOP;
+  }
+}
+
 function firstNeumeEventId(document: ChantDocument, voice: Voice | undefined): Id {
   if (voice === undefined) {
     return "";
@@ -1198,6 +1494,13 @@ function addIndex(index: Record<Id, Id[]>, semanticId: Id, layoutId: Id): void {
   index[semanticId] = ids;
 }
 
+function addTextSpanAnchor(context: LayoutContext, textSpanId: Id, anchor: LayoutTextSpanAnchor): void {
+  const anchors = context.textSpanAnchors[textSpanId] ?? [];
+  anchors.push(anchor);
+  context.textSpanAnchors[textSpanId] = anchors;
+  context.textSpanRelations[textSpanId] = anchor.relation;
+}
+
 function unique(ids: Id[]): Id[] {
   return [...new Set(ids)];
 }
@@ -1220,7 +1523,7 @@ function unionRects(rects: Rect[]): Rect | undefined {
 }
 
 function measureText(text: string): number {
-  return Math.max(0.8, text.length * 0.48);
+  return Math.max(LYRIC_TEXT_SIZE * 0.8, text.length * LYRIC_TEXT_WIDTH_PER_CHARACTER * LYRIC_TEXT_SIZE);
 }
 
 function compareGlyphs(left: LayoutGlyph, right: LayoutGlyph): number {
