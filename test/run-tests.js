@@ -43,10 +43,20 @@ function run() {
   testKyrieEleisonFixtureTransposition();
   testCreateWordWithSyllables();
   testDottedNeumeSigns();
+  testMoraAvoidsStaffLine();
   testLowNeumePushesLyricBaseline();
+  testWordSpacingPreventsLyricCollision();
+  testMultiSystemLayoutWrapsAndConstrainsLyrics();
+  testCrampedSyllablesSuppressHyphen();
   testSyllabicPhraseHelpers();
+  testSyllabicPhraseCompactWordTuple();
+  testSyllabicPhraseArrayPitchObject();
+  testSyllabicPhraseReadableIds();
   testSyllabicPhraseBarAndTextOnly();
   testSyllabicPhraseMixedNeumeMelisma();
+  testPodatusLayoutMatchesExsurge();
+  testClivisLayoutMatchesExsurge();
+  testTorculusLayoutMatchesExsurge();
   testPorrectusEndingVariants();
   testMultiNeumeMelisma();
   testWriteSvgFile();
@@ -75,8 +85,10 @@ function testKyrieLayoutAndSvg() {
   assert.ok(lowerNote);
   assert.ok(upperNote);
   assert.equal(clefGlyph.y, 3 - (clefGlyph.height / 2));
+  assert.equal(lowerNote.defKey, "podatusLower");
+  assert.equal(upperNote.defKey, "podatusUpper");
   assert.equal(lowerNote.width, 1);
-  assert.equal(lowerNote.height, 1.2343799591064453);
+  assert.equal(lowerNote.height, 1.0312399291992187);
   assert.ok(upperNote.y < lowerNote.y);
   assert.ok(svg.startsWith("<svg"));
   assert.ok(svg.includes("data-semantic-id"));
@@ -85,7 +97,6 @@ function testKyrieLayoutAndSvg() {
   assert.ok(svg.includes('id="glyph-clefC"'));
   assert.ok(svg.includes('preserveAspectRatio="xMinYMid meet"'));
   assert.ok(svg.includes("font-size:18px"));
-  assert.ok(layout.systems[0].textRuns.some((run) => run.text === "-"));
   assert.ok(svg.includes(">ri-e<"));
   assert.equal(svg, svgAgain);
   assert.equal(JSON.stringify(kyrieExampleDocument), before);
@@ -169,6 +180,34 @@ function testDottedNeumeSigns() {
   assert.ok(svg.includes('href="#glyph-mora"'));
 }
 
+function testMoraAvoidsStaffLine() {
+  const doc = createEmptyChantDocument({ id: "doc_mora_staff_line" });
+  const staff = createStaff(doc, {
+    id: "staff_main",
+    defaultClef: new ClefDef("c", 4),
+  });
+  const voice = createVoice(doc, {
+    id: "voice_chant",
+    staffId: staff.id,
+  });
+
+  createNeumeGroup(doc, {
+    id: "ng_line_mora",
+    eventId: "evt_ng_line_mora",
+    voiceId: voice.id,
+    notes: [{ id: "note_line_mora", pitch: 0, sign: "dotted" }],
+  });
+
+  const layout = layoutChant(doc, { width: 80 });
+  const noteGlyph = layout.systems[0].glyphs.find((glyph) => glyph.id === "lg_note_line_mora");
+  const moraGlyph = layout.systems[0].glyphs.find((glyph) => glyph.id === "lg_note_line_mora_mora");
+
+  assert.ok(noteGlyph);
+  assert.ok(moraGlyph);
+  assert.ok(moraGlyph.x - (noteGlyph.x + noteGlyph.width) > 0.3);
+  assert.notEqual(moraGlyph.y + (moraGlyph.height / 2), layout.systems[0].staffs[0].lineYs[0]);
+}
+
 function testLowNeumePushesLyricBaseline() {
   const regularLayout = layoutChant(createUnderlaySpacingDocument("regular", [
     { suffix: "first", pitch: 0 },
@@ -194,6 +233,125 @@ function testLowNeumePushesLyricBaseline() {
   assert.deepEqual(lowTextRuns.map((item) => item.baselineY), [lowSyllable.baselineY, lowSyllable.baselineY]);
   assert.ok(lowSyllable.bounds.y > lowNeume.rect.y + lowNeume.rect.height);
   assert.ok(lowLayout.viewport.height > regularLayout.viewport.height);
+}
+
+function testWordSpacingPreventsLyricCollision() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_word_spacing",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+
+  createSyllabicPhrase(doc, {
+    voiceId: voice.id,
+    blockId: "tb_main",
+    words: [
+      {
+        normalisedText: "mater",
+        syllables: [
+          ["ma", -7],
+          ["ter", -6],
+        ],
+      },
+      {
+        normalisedText: "misericordiae",
+        syllables: [
+          ["mi", -6],
+          ["se", -6],
+        ],
+      },
+    ],
+  });
+
+  const layout = layoutChant(doc, { width: 80 });
+  const textRuns = layout.systems[0].textRuns;
+  const ter = textRuns.find((run) => run.text === "ter");
+  const mi = textRuns.find((run) => run.text === "mi");
+
+  assert.ok(ter);
+  assert.ok(mi);
+  assert.ok(textRunLeft(mi) - textRunRight(ter) >= 0.69);
+}
+
+function testMultiSystemLayoutWrapsAndConstrainsLyrics() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_multi_system_wrap",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+
+  createSyllabicPhrase(doc, {
+    voiceId: voice.id,
+    blockId: "tb_main",
+    words: [
+      ["sal", -2],
+      ["ve", -3],
+      ["re", -4],
+      ["gi", -5],
+      ["na", -4],
+      ["ma", -5],
+      ["ter", -6],
+      ["mi", -5],
+      ["se", -4],
+      ["ri", -3],
+      ["cor", -4],
+      ["di", -5],
+      ["ae", -6],
+    ],
+  });
+
+  const layout = layoutChant(doc, { width: 24 });
+  const semanticLyricRuns = layout.systems.flatMap((system) =>
+    system.textRuns.filter((run) => run.semanticId?.startsWith("span_")));
+
+  assert.ok(layout.systems.length > 1);
+  assert.ok(layout.viewport.height > layout.systems[0].rect.height);
+  assert.ok(layout.systems[1].staffs[0].lineYs[0] > layout.systems[0].staffs[0].lineYs[0]);
+  assert.equal(semanticLyricRuns.length, Object.keys(doc.text.spans).length);
+
+  for (const system of layout.systems) {
+    for (const run of system.textRuns) {
+      assert.ok(textRunRight(run) <= 22.000001);
+    }
+    for (const glyph of system.glyphs) {
+      assert.ok(glyph.x + glyph.width <= 22.000001);
+    }
+  }
+}
+
+function testCrampedSyllablesSuppressHyphen() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_cramped_hyphen",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+
+  createSyllabicPhrase(doc, {
+    voiceId: voice.id,
+    blockId: "tb_main",
+    words: [
+      {
+        normalisedText: "longword",
+        syllables: [
+          ["longone", -1],
+          ["longtwo", -1],
+        ],
+      },
+    ],
+  });
+
+  const layout = layoutChant(doc, { width: 80 });
+  const hyphenRuns = layout.systems[0].textRuns.filter((run) => run.classes.includes("lyric-hyphen"));
+  const longone = layout.systems[0].textRuns.find((run) => run.text === "longone");
+  const longtwo = layout.systems[0].textRuns.find((run) => run.text === "longtwo");
+
+  assert.ok(longone);
+  assert.ok(longtwo);
+  assert.ok(textRunLeft(longtwo) - textRunRight(longone) < 0.4);
+  assert.equal(hyphenRuns.length, 0);
 }
 
 function testSyllabicPhraseHelpers() {
@@ -233,12 +391,132 @@ function testSyllabicPhraseHelpers() {
   assert.equal(phrase.words.length, 2);
   assert.equal(phrase.neumes.length, 5);
   assert.equal(phrase.alignments.length, 5);
-  assert.deepEqual(doc.text.words.word_salve.syllableIds, ["syl_1", "syl_2"]);
-  assert.deepEqual(doc.text.blocks[0].orderedSpanIds, ["span_1", "span_2", "span_3", "span_4", "span_5"]);
+  assert.deepEqual(doc.text.words.word_salve.syllableIds, ["syl_sal", "syl_ve"]);
+  assert.deepEqual(doc.text.blocks[0].orderedSpanIds, ["span_sal", "span_ve", "span_re", "span_gi", "span_na"]);
   assert.equal(doc.music.notes.note_na.sign, "punctum");
   assert.deepEqual(doc.music.notes.note_na.rhythmicSigns, ["mora"]);
   assert.equal(voice.eventIds.at(-1), bar.id);
   assert.equal(validateChantDocument(doc).valid, true);
+}
+
+function testSyllabicPhraseCompactWordTuple() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_compact_word_tuple",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+  const phrase = createSyllabicPhrase(doc, {
+    voiceId: voice.id,
+    blockId: "tb_main",
+    words: [
+      ["te", -2],
+    ],
+  });
+
+  assert.equal(phrase.words.length, 1);
+  assert.deepEqual(phrase.words[0].word.syllableIds, ["syl_te"]);
+  assert.equal(phrase.words[0].word.normalisedText, "te");
+  assert.equal(doc.text.syllables.syl_te.text, "te");
+  assert.deepEqual(doc.text.blocks[0].orderedSpanIds, ["span_te"]);
+  assert.deepEqual(voice.eventIds, ["evt_te"]);
+  assert.equal(doc.music.notes.note_te.pitch.diatonicIndex, -2);
+  assert.equal(validateChantDocument(doc).valid, true);
+}
+
+function testSyllabicPhraseArrayPitchObject() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_array_pitch_object",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+  const phrase = createSyllabicPhrase(doc, {
+    voiceId: voice.id,
+    blockId: "tb_main",
+    words: [
+      {
+        normalisedText: "nostra",
+        syllables: [
+          { text: "no", pitch: [-5, -4], neumeKind: "podatus" },
+        ],
+      },
+    ],
+  });
+  const layout = layoutChant(doc, { width: 80 });
+  const glyphs = layout.systems[0].glyphs;
+  const lower = glyphs.find((glyph) => glyph.id === "lg_note_no_podatus");
+  const upper = glyphs.find((glyph) => glyph.id === "lg_note_no_podatus_2");
+
+  assert.equal(phrase.neumes[0].notes.length, 2);
+  assert.ok(lower);
+  assert.ok(upper);
+  assert.equal(lower.defKey, "podatusLower");
+  assert.equal(upper.defKey, "podatusUpper");
+  assert.ok(Number.isFinite(lower.y));
+  assert.ok(Number.isFinite(upper.y));
+}
+
+function testSyllabicPhraseReadableIds() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_readable_ids",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+  const phrase = createSyllabicPhrase(doc, {
+    voiceId: voice.id,
+    blockId: "tb_main",
+    words: [
+      {
+        normalisedText: "Amen",
+        syllables: [
+          ["A", 0],
+          ["men", 1],
+        ],
+      },
+      {
+        normalisedText: "Amen",
+        syllables: [
+          ["A", 2],
+          ["men", 3],
+        ],
+      },
+      {
+        syllables: [
+          {
+            music: "bar",
+            bar: { kind: "half", phraseStrength: "minor" },
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(phrase.words[0].word.id, "word_amen");
+  assert.equal(phrase.words[1].word.id, "word_amen_2");
+  assert.deepEqual(phrase.words[0].word.syllableIds, ["syl_a", "syl_men"]);
+  assert.deepEqual(phrase.words[1].word.syllableIds, ["syl_a_2", "syl_men_2"]);
+  assert.deepEqual(doc.text.blocks[0].orderedSpanIds, ["span_a", "span_men", "span_a_2", "span_men_2", "span_bar_half"]);
+  assert.deepEqual(voice.eventIds, ["evt_a", "evt_men", "evt_a_2", "evt_men_2", "evt_bar_half"]);
+  assert.deepEqual(doc.music.neumeGroups.ng_a.noteIds, ["note_a"]);
+  assert.deepEqual(doc.music.neumeGroups.ng_a_2.noteIds, ["note_a_2"]);
+  assert.equal(doc.text.syllables.syl_bar_half.text, "*");
+  assert.equal(doc.music.events.evt_bar_half.kind, "half");
+  assert.equal(validateChantDocument(doc).valid, true);
+  assert.throws(
+    () => createSyllabicPhrase(doc, {
+      voiceId: voice.id,
+      words: [
+        {
+          syllables: [
+            { id: "syl_a", text: "A", pitch: 0 },
+          ],
+        },
+      ],
+    }),
+    /Duplicate syllable id: syl_a/,
+  );
 }
 
 function testSyllabicPhraseBarAndTextOnly() {
@@ -276,6 +554,8 @@ function testSyllabicPhraseBarAndTextOnly() {
   const textRuns = layout.systems[0].textRuns;
   const semanticTextRuns = textRuns.filter((run) => run.semanticId?.startsWith("span_"));
   const barGlyph = layout.systems[0].glyphs.find((glyph) => glyph.id === "lg_evt_lu_bar_bar");
+  const alNoteGlyph = layout.systems[0].glyphs.find((glyph) => glyph.semanticId === doc.music.neumeGroups.ng_al.noteIds[0]);
+  const iaNoteGlyph = layout.systems[0].glyphs.find((glyph) => glyph.semanticId === doc.music.neumeGroups.ng_ia.noteIds[0]);
   const luRun = semanticTextRuns.find((run) => run.semanticId === "span_lu");
   const leRun = semanticTextRuns.find((run) => run.semanticId === "span_le");
   const leSyllable = layout.systems[0].syllables.find((syllable) => syllable.semanticTextSpanId === "span_le");
@@ -291,11 +571,19 @@ function testSyllabicPhraseBarAndTextOnly() {
   assert.equal(doc.alignment.links.aln_lu_bar.relation, "editorialAssociation");
   assert.deepEqual(doc.text.blocks[0].orderedSpanIds, ["span_al", "span_le", "span_lu", "span_ia"]);
   assert.deepEqual(semanticTextRuns.map((run) => run.text), ["Al", "le", "lu", "ia"]);
-  assert.deepEqual(textRuns.map((run) => run.text), ["Al", "-", "le", "-", "lu", "-", "ia"]);
+  assert.deepEqual(textRuns.map((run) => run.text), ["Al", "le", "lu", "-", "ia"]);
   assert.ok(barGlyph);
   assert.equal(barGlyph.defKey, "barQuarter");
   assert.equal(barGlyph.y, 2);
   assert.equal(barGlyph.height, 2);
+  assert.ok(alNoteGlyph);
+  assert.ok(iaNoteGlyph);
+  assert.ok(barGlyph.x > alNoteGlyph.x + alNoteGlyph.width);
+  assert.ok(iaNoteGlyph.x > barGlyph.x + barGlyph.width);
+  assert.ok(
+    barGlyph.x - (alNoteGlyph.x + alNoteGlyph.width) >
+      iaNoteGlyph.x - (barGlyph.x + barGlyph.width),
+  );
   assert.ok(luRun);
   assert.equal(luRun.x, barGlyph.x + (barGlyph.width / 2));
   assert.ok(leRun);
@@ -329,8 +617,7 @@ function testSyllabicPhraseMixedNeumeMelisma() {
                 eventId: "evt_sal_porrectus",
                 notes: [-2, -3, -2],
                 noteIdPrefix: "note_sal_porrectus",
-                contourKindHint: "porrectus",
-                notationHints: [{ key: "glyph", value: "porrectus" }],
+                neumeKind: "porrectus",
               },
             ],
           },
@@ -354,7 +641,7 @@ function testSyllabicPhraseMixedNeumeMelisma() {
   assert.equal(phrase.alignments[0].relation, "melisma");
   assert.equal(phrase.alignments[0].policy.musicDistribution, "sequentialGroups");
   assert.deepEqual(voice.eventIds.slice(0, 2), ["evt_sal_punctum", "evt_sal_porrectus"]);
-  assert.deepEqual(doc.alignment.links.aln_1.musicTargets.map((target) => [target.fromEventId, target.toEventId]), [
+  assert.deepEqual(doc.alignment.links.aln_sal.musicTargets.map((target) => [target.fromEventId, target.toEventId]), [
     ["evt_sal_punctum", "evt_sal_porrectus"],
   ]);
   assert.ok(salSyllable);
@@ -426,6 +713,159 @@ function testPorrectusEndingVariants() {
   assert.equal(hiddenSecondNote.defKey, "none");
 }
 
+function testClivisLayoutMatchesExsurge() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_clivis",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+
+  createNeumeGroup(doc, {
+    id: "ng_clivis",
+    eventId: "evt_clivis",
+    voiceId: voice.id,
+    notes: [
+      { id: "note_clivis_1", pitch: -2 },
+      { id: "note_clivis_2", pitch: -3 },
+    ],
+    neumeKind: "clivis",
+  });
+
+  const layout = layoutChant(doc, { width: 80 });
+  const glyphs = layout.systems[0].glyphs;
+  const upper = glyphs.find((glyph) => glyph.id === "lg_note_clivis_1");
+  const lower = glyphs.find((glyph) => glyph.id === "lg_note_clivis_2");
+  const line = glyphs.find((glyph) => glyph.id === "lg_note_clivis_2_note_clivis_1_clivis_hanging_line");
+  const svg = renderSvg(layout);
+
+  assert.ok(upper);
+  assert.ok(lower);
+  assert.ok(line);
+  assert.equal(upper.defKey, "punctum");
+  assert.equal(lower.defKey, "punctum");
+  assert.equal(line.defKey, "neumeConnectorLine");
+  assert.ok(line.classes.includes("clivis-hanging-line"));
+  assert.equal(lower.x, upper.x + upper.width);
+  assert.equal(line.x, upper.x + (line.width / 2));
+  assert.equal(line.y, upper.y + (upper.height / 2));
+  assert.ok(line.height > (lower.y + (lower.height / 2)) - line.y);
+  assert.equal(
+    Number(line.height.toFixed(6)),
+    Number((((lower.y + (lower.height / 2)) + 1 + (upper.height / 2.2)) - line.y).toFixed(6)),
+  );
+  assert.deepEqual(layout.index.semanticToLayoutIds.note_clivis_1, ["lg_note_clivis_1"]);
+  assert.deepEqual(layout.index.semanticToLayoutIds.note_clivis_2, ["lg_note_clivis_2"]);
+  assert.ok(svg.includes("clivis-hanging-line"));
+}
+
+function testTorculusLayoutMatchesExsurge() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_torculus",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+
+  createNeumeGroup(doc, {
+    id: "ng_torculus",
+    eventId: "evt_torculus",
+    voiceId: voice.id,
+    notes: [
+      { id: "note_torculus_1", pitch: -4 },
+      { id: "note_torculus_2", pitch: -1 },
+      { id: "note_torculus_3", pitch: -4 },
+    ],
+    neumeKind: "torculus",
+  });
+
+  const before = JSON.stringify(doc);
+  const layout = layoutChant(doc, { width: 80 });
+  const glyphs = layout.systems[0].glyphs;
+  const first = glyphs.find((glyph) => glyph.id === "lg_note_torculus_1");
+  const second = glyphs.find((glyph) => glyph.id === "lg_note_torculus_2");
+  const third = glyphs.find((glyph) => glyph.id === "lg_note_torculus_3");
+  const connectors = glyphs.filter((glyph) => glyph.classes.includes("torculus-connector-line"));
+  const firstConnector = glyphs.find((glyph) => glyph.id === "lg_note_torculus_1_note_torculus_2_torculus_connector");
+  const secondConnector = glyphs.find((glyph) => glyph.id === "lg_note_torculus_2_note_torculus_3_torculus_connector");
+  const svg = renderSvg(layout);
+
+  assert.ok(first);
+  assert.ok(second);
+  assert.ok(third);
+  assert.equal(first.defKey, "punctum");
+  assert.equal(second.defKey, "punctum");
+  assert.equal(third.defKey, "punctum");
+  assert.ok(second.x > first.x);
+  assert.ok(second.x < first.x + first.width);
+  assert.ok(third.x > second.x);
+  assert.ok(third.x < second.x + second.width);
+  assert.equal(connectors.length, 2);
+  assert.ok(firstConnector);
+  assert.ok(secondConnector);
+  assert.equal(firstConnector.defKey, "neumeConnectorLine");
+  assert.equal(secondConnector.defKey, "neumeConnectorLine");
+  assert.ok(firstConnector.x > second.x);
+  assert.ok(firstConnector.x < first.x + first.width);
+  assert.ok(secondConnector.x > third.x);
+  assert.ok(secondConnector.x < second.x + second.width);
+  assert.ok(firstConnector.height > 0);
+  assert.ok(secondConnector.height > 0);
+  assert.ok(firstConnector.classes.includes("neume-line"));
+  assert.ok(secondConnector.classes.includes("neume-line"));
+  assert.deepEqual(layout.index.semanticToLayoutIds.note_torculus_1, ["lg_note_torculus_1"]);
+  assert.deepEqual(layout.index.semanticToLayoutIds.note_torculus_2, ["lg_note_torculus_2"]);
+  assert.deepEqual(layout.index.semanticToLayoutIds.note_torculus_3, ["lg_note_torculus_3"]);
+  assert.ok(svg.includes("torculus-connector-line"));
+  assert.equal(JSON.stringify(doc), before);
+}
+
+function testPodatusLayoutMatchesExsurge() {
+  const { doc, voice } = createChantDocument({
+    id: "doc_podatus",
+    staff: {
+      defaultClef: new ClefDef("c", 4),
+    },
+  });
+
+  createNeumeGroup(doc, {
+    id: "ng_podatus",
+    eventId: "evt_podatus",
+    voiceId: voice.id,
+    notes: [
+      { id: "note_podatus_1", pitch: -3 },
+      { id: "note_podatus_2", pitch: -2 },
+    ],
+    neumeKind: "podatus",
+  });
+
+  const layout = layoutChant(doc, { width: 80 });
+  const glyphs = layout.systems[0].glyphs;
+  const lower = glyphs.find((glyph) => glyph.id === "lg_note_podatus_1");
+  const upper = glyphs.find((glyph) => glyph.id === "lg_note_podatus_2");
+  const connector = glyphs.find((glyph) => glyph.id === "lg_note_podatus_1_note_podatus_2_podatus_connector");
+  const svg = renderSvg(layout);
+
+  assert.ok(lower);
+  assert.ok(upper);
+  assert.ok(connector);
+  assert.equal(lower.defKey, "podatusLower");
+  assert.equal(upper.defKey, "podatusUpper");
+  assert.equal(connector.defKey, "neumeConnectorLine");
+  assert.ok(connector.classes.includes("podatus-connector-line"));
+  assert.ok(connector.height > 0);
+  assert.equal(Number(connector.x.toFixed(6)), Number((lower.x + lower.width - (connector.width / 2)).toFixed(6)));
+  assert.ok(lower.classes.includes("note-podatus-lower"));
+  assert.ok(upper.classes.includes("note-podatus-upper"));
+  assert.equal(Number((upper.x + upper.width).toFixed(6)), Number((lower.x + lower.width).toFixed(6)));
+  assert.ok(upper.y < lower.y);
+  assert.deepEqual(layout.index.semanticToLayoutIds.note_podatus_1, ["lg_note_podatus_1"]);
+  assert.deepEqual(layout.index.semanticToLayoutIds.note_podatus_2, ["lg_note_podatus_2"]);
+  assert.ok(svg.includes('href="#glyph-podatusLower"'));
+  assert.ok(svg.includes('href="#glyph-podatusUpper"'));
+  assert.ok(svg.includes("podatus-connector-line"));
+}
+
 function testMultiNeumeMelisma() {
   const doc = createMelismaDocument();
   const layout = layoutChant(doc, { width: 80 });
@@ -465,8 +905,7 @@ function layoutPorrectusNeume(suffix, pitches) {
       id: `note_${suffix}_${index + 1}`,
       pitch,
     })),
-    contourKindHint: "porrectus",
-    notationHints: [{ key: "glyph", value: "porrectus" }],
+    neumeKind: "porrectus",
   });
 
   return layoutChant(doc, { width: 80 });
@@ -508,6 +947,14 @@ function createUnderlaySpacingDocument(documentSuffix, neumes) {
   });
 
   return doc;
+}
+
+function textRunLeft(run) {
+  return run.x - (run.width / 2);
+}
+
+function textRunRight(run) {
+  return run.x + (run.width / 2);
 }
 
 function createMelismaDocument() {
