@@ -8,7 +8,7 @@ import {
   createStaff,
   createSyllable,
   createVoice,
-} from "../factory";
+} from "../operations";
 import { BarEvent, ClefChange, ClefDef, StaffPitch } from "../music";
 
 type SourceSyllable = {
@@ -169,14 +169,13 @@ function addPhrase(doc: ReturnType<typeof createEmptyChantDocument>, voiceId: Id
       id: `ng_${phrase.id}_${index + 1}`,
       eventId: `evt_${phrase.id}_${index + 1}`,
       voiceId,
-      contourKindHint: sourceSyllable.gabc,
+      notationHints: [{ key: "gabc", value: sourceSyllable.gabc }],
       notes: gabcPitches(sourceSyllable.gabc).map((pitch, noteIndex) => ({
         id: `note_${phrase.id}_${index + 1}_${noteIndex + 1}`,
         pitch,
       })),
     });
 
-    neume.neumeGroup.notationHints.push({ key: "gabc", value: sourceSyllable.gabc });
     attachTextToMusic(doc, {
       id: `aln_${phrase.id}_${index + 1}`,
       textSpanId: spanId,
