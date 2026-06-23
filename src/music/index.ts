@@ -9,6 +9,18 @@ export type BarKind = "quarter" | "half" | "full" | "double" | "final";
 export type PhraseStrength = "minor" | "medium" | "major";
 export type SpacerReason = "sharedGestureSplit" | "editorialGap";
 export type NeumeGroupingRole = "primary" | "secondary" | "ornamental" | "editorial";
+export type NeumeKind =
+  | "punctum"
+  | "virga"
+  | "podatus"
+  | "clivis"
+  | "torculus"
+  | "porrectus"
+  | "scandicus"
+  | "climacus"
+  | "quilisma"
+  | "oriscus"
+  | "stropha";
 
 export type NoteSign =
   | "punctum"
@@ -180,7 +192,7 @@ export class NeumeGroup {
     public id: Id,
     public voiceId: Id,
     public noteIds: Id[] = [],
-    public contourKindHint?: string,
+    public neumeKind?: NeumeKind,
     public notationHints: NotationHint[] = [],
     public groupingRole?: NeumeGroupingRole,
   ) {}
