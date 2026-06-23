@@ -2,7 +2,7 @@ import type { AlignmentRelation } from "../alignment";
 import type { Id } from "../common";
 import type { ChantDocument } from "../document";
 import { BarEvent, ClefChange, NeumeGroupEvent, type ClefDef, type NeumeGroup, type RhythmicSign, type Staff, type Voice } from "../music";
-import { getStaffPosition, getTextForEvent, getVoiceEvents } from "../query";
+import { getStaffPosition, getTextForEvent, getVoiceEvents, type ResolvedVoiceEvent } from "../query";
 
 export type LayoutPageMode = "continuous" | "paged";
 export type LayoutRendererKind = "svg" | "canvas" | "webgl" | "hybrid";
@@ -240,6 +240,21 @@ type LayoutContext = {
   neumes: LayoutNeume[];
 };
 
+type SystemLayoutState = {
+  systemId: Id;
+  index: number;
+  layoutStaffId: Id;
+  lineYs: number[];
+  context: LayoutContext;
+  x: number;
+  pendingClefX?: number;
+  underlayCursor?: UnderlayPlacement;
+  startClef?: ClefDef;
+  startClefSemanticId: Id;
+  startClefGlyphId: Id;
+  contentEventCount: number;
+};
+
 type LayoutTextSpanAnchor = {
   x: number;
   spanStart: number;
@@ -270,6 +285,9 @@ const LYRIC_BASELINE_BELOW_STAFF = 2;
 const LYRIC_NEUME_CLEARANCE = 0.35;
 const LYRIC_TEXT_SIZE = 1.8;
 const LYRIC_TEXT_WIDTH_PER_CHARACTER = 0.48;
+const LYRIC_MIN_GAP = 0.12;
+const LYRIC_WORD_GAP = 0.7;
+const LYRIC_HYPHEN_MIN_GAP = 0.4;
 const NOTE_WIDTH = 1;
 const NOTE_HEIGHT = exsurgeGlyphSize(100, 123.43799591064453).height;
 const NOTE_GAP = 0.75;
@@ -283,32 +301,45 @@ const NEUME_CONNECTOR_LINE_WIDTH = LINE_THICKNESS;
 const PORRECTUS_START_LINE_X_OFFSET = 0;
 const PORRECTUS_CONNECTOR_MIN_INTERVAL_STEPS = 2;
 const PORRECTUS_CONNECTOR_X_OFFSET = 0.55;
+const PODATUS_CONNECTOR_X_OFFSET = NOTE_WIDTH - (NEUME_CONNECTOR_LINE_WIDTH / 2);
+const TORCULUS_CONNECTOR_MIN_INTERVAL_STEPS = 2;
+const TORCULUS_NOTE_GAP = -0.2;
+const TORCULUS_CONNECTOR_NOTE_CLEARANCE = -0.17;
+const TORCULUS_SECOND_NOTE_X_OFFSET = NOTE_WIDTH + TORCULUS_NOTE_GAP;
+const TORCULUS_THIRD_NOTE_X_OFFSET = TORCULUS_SECOND_NOTE_X_OFFSET + (NOTE_WIDTH + TORCULUS_NOTE_GAP);
+const TORCULUS_FIRST_CONNECTOR_X_OFFSET = TORCULUS_SECOND_NOTE_X_OFFSET - TORCULUS_CONNECTOR_NOTE_CLEARANCE - (NEUME_CONNECTOR_LINE_WIDTH / 2);
+const TORCULUS_SECOND_CONNECTOR_X_OFFSET = TORCULUS_THIRD_NOTE_X_OFFSET - TORCULUS_CONNECTOR_NOTE_CLEARANCE - (NEUME_CONNECTOR_LINE_WIDTH / 2);
+const CLIVIS_HANGING_LINE_X_OFFSET = NEUME_CONNECTOR_LINE_WIDTH / 2;
+const CLIVIS_HANGING_LINE_PUNCTUM_OVERSHOOT = NOTE_HEIGHT / 2.2;
+const PODATUS_UPPER_X_OFFSET = NOTE_WIDTH - exsurgeGlyphSize(91.406005859375, 125.78099822998047).width;
 const MORA_SIZE = exsurgeGlyphSize(48, 48).width;
-const MORA_GAP = 0.15;
+const MORA_GAP = 0.35;
+const MORA_ON_LINE_Y_OFFSET = STAFF_STEP_INTERVAL / 2;
 const NEUME_GAP = 1.2;
-const BAR_GAP = 1.2;
+const BAR_GAP = 2;
+const BAR_SIDE_GAP = BAR_GAP ;
 const TEXT_ONLY_GAP = 1.2;
+const SYSTEM_GAP = STAFF_LINE_INTERVAL * 1;
+
+type UnderlayPlacement = {
+  textSpanId: Id;
+  wordId?: Id;
+  leftX: number;
+  rightX: number;
+};
 
 export function layoutChant(document: ChantDocument, options: LayoutOptions): LayoutDocument {
   const width = options.width;
   const pxPerStaffSpace = options.pxPerStaffSpace ?? 10;
   const diagnostics: LayoutDiagnostic[] = [];
-  const semanticToLayoutIds: Record<Id, Id[]> = {};
+  let semanticToLayoutIds: Record<Id, Id[]> = {};
   const voiceToSystemIds: Record<Id, Id[]> = {};
   const textSpanToSyllableIds: Record<Id, Id[]> = {};
   const staffs = sortedValues(document.music.staves);
   const voices = sortedValues(document.music.voices);
   const primaryStaff = staffs[0];
   const primaryVoice = voices[0];
-  const systemId = "sys_1";
-  const layoutStaffId = primaryStaff === undefined ? "lst_missing_staff" : `lst_${safeId(primaryStaff.id)}`;
   const staffWidth = Math.max(0, width - STAFF_LEFT - SYSTEM_MARGIN);
-  const lineYs = [0, 1, 2, 3].map((offset) => STAFF_TOP + (offset * STAFF_LINE_INTERVAL));
-  const glyphs: LayoutGlyph[] = [];
-  const neumes: LayoutNeume[] = [];
-  const textSpanToNeumeIds: Record<Id, Id[]> = {};
-  const textSpanRelations: Record<Id, AlignmentRelation> = {};
-  const textSpanAnchors: Record<Id, LayoutTextSpanAnchor[]> = {};
 
   if (primaryStaff === undefined || primaryVoice === undefined) {
     diagnostics.push({
@@ -318,158 +349,122 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
     });
   }
 
-  const context: LayoutContext = {
-    doc: document,
-    systemId,
-    staffId: layoutStaffId,
-    lineYs,
-    semanticToLayoutIds,
-    textSpanToNeumeIds,
-    textSpanRelations,
-    textSpanAnchors,
-    glyphs,
-    neumes,
-  };
-
-  let x = STAFF_LEFT;
   const clefEvent = primaryVoice === undefined
     ? undefined
     : getVoiceEvents(document, primaryVoice.id).find((entry) => entry.event instanceof ClefChange);
-  const clef = clefEvent?.event instanceof ClefChange
+  let activeClef = clefEvent?.event instanceof ClefChange
     ? clefEvent.event.clef
     : primaryStaff?.defaultClef;
-  const clefSemanticId = clefEvent?.eventId ?? primaryStaff?.id ?? "clef_default";
-  const clefGlyphId = `lg_${safeId(clefSemanticId)}_clef`;
-
-  if (primaryStaff !== undefined) {
-    const clefGlyph = makeClefGlyph(clefGlyphId, clefSemanticId, systemId, layoutStaffId, x, clef ?? primaryStaff.defaultClef);
-    glyphs.push(clefGlyph);
-    addIndex(semanticToLayoutIds, clefSemanticId, clefGlyph.id);
-  }
-
-  x += 2.4;
+  let activeClefSemanticId = clefEvent?.eventId ?? primaryStaff?.id ?? "clef_default";
+  const systemStates: SystemLayoutState[] = [];
+  let currentState = createSystemLayoutState({
+    document,
+    primaryStaff,
+    voices,
+    semanticToLayoutIds,
+    index: 0,
+    startClef: activeClef ?? primaryStaff?.defaultClef,
+    startClefSemanticId: activeClefSemanticId,
+  });
+  semanticToLayoutIds = currentState.context.semanticToLayoutIds;
+  systemStates.push(currentState);
 
   if (primaryVoice !== undefined) {
-    voiceToSystemIds[primaryVoice.id] = [systemId];
-    let pendingClefX: number | undefined;
+    voiceToSystemIds[primaryVoice.id] = [currentState.systemId];
 
     for (const entry of getVoiceEvents(document, primaryVoice.id)) {
       if (entry.event instanceof ClefChange) {
-        if (entry.eventId !== clefSemanticId) {
-          const clefX = pendingClefX ?? x;
-          const inlineClefGlyph = makeClefGlyph(
-            `lg_${safeId(entry.eventId)}_clef`,
-            entry.eventId,
-            systemId,
-            layoutStaffId,
-            clefX,
-            entry.event.clef,
-          );
-          glyphs.push(inlineClefGlyph);
-          addIndex(semanticToLayoutIds, entry.eventId, inlineClefGlyph.id);
-          x = clefX + 2.4;
-        }
-        pendingClefX = undefined;
-        continue;
-      }
+        activeClef = entry.event.clef;
+        activeClefSemanticId = entry.eventId;
 
-      if (entry.event instanceof NeumeGroupEvent) {
-        pendingClefX = undefined;
-        const neumeGroup = document.music.neumeGroups[entry.event.neumeGroupId];
-        if (neumeGroup === undefined) {
+        if (entry.eventId === currentState.startClefSemanticId && currentState.contentEventCount === 0) {
+          currentState.pendingClefX = undefined;
           continue;
         }
 
-        const notes = neumeGroup.noteIds.flatMap((noteId) => {
-          const note = document.music.notes[noteId];
-          return note === undefined ? [] : [note];
-        });
+        const trial = cloneSystemLayoutState(currentState);
+        placeClefChangeOnState(trial, entry.eventId, entry.event.clef);
 
-        const laidOut = layoutNeumeGroup(context, primaryVoice, primaryStaff ?? entry.staff, neumeGroup, notes, entry.activeClef ?? primaryStaff?.defaultClef, x);
-        x = laidOut.nextX;
+        if (shouldBreakBeforeState(trial, width) && currentState.contentEventCount > 0) {
+          currentState = createSystemLayoutState({
+            document,
+            primaryStaff,
+            voices,
+            semanticToLayoutIds,
+            index: systemStates.length,
+            startClef: activeClef,
+            startClefSemanticId: activeClefSemanticId,
+          });
+          systemStates.push(currentState);
+          addVoiceSystemId(voiceToSystemIds, primaryVoice.id, currentState.systemId);
+        } else {
+          currentState = trial;
+          systemStates[systemStates.length - 1] = currentState;
+          semanticToLayoutIds = currentState.context.semanticToLayoutIds;
+        }
         continue;
       }
 
-      if (entry.event instanceof BarEvent) {
-        const barGlyphId = `lg_${safeId(entry.eventId)}_bar`;
-        const barDef = barDefKey(entry.event.kind);
-        const barSize = glyphSizeForDef(barDef);
-        const barGlyph = makeGlyph({
-          id: barGlyphId,
-          semanticId: entry.eventId,
-          systemId,
-          staffId: layoutStaffId,
-          defKey: barDef,
-          kind: "barline",
-          x,
-          y: barY(barDef),
-          width: barSize.width,
-          height: barSize.height,
-          zIndex: 2,
-          classes: ["barline", `barline-${entry.event.kind}`],
-        });
-        glyphs.push(barGlyph);
-        addIndex(semanticToLayoutIds, entry.eventId, barGlyph.id);
+      if (entry.event instanceof NeumeGroupEvent || entry.event instanceof BarEvent) {
+        const trial = cloneSystemLayoutState(currentState);
+        placeMusicEventOnState(trial, document, primaryVoice, primaryStaff ?? entry.staff, entry);
 
-        for (const text of getTextForEvent(document, primaryVoice.id, entry.eventId)) {
-          addTextSpanAnchor(context, text.link.textSpanId, {
-            x: x + (barGlyph.width / 2),
-            spanStart: x,
-            spanEnd: x + barGlyph.width,
-            relation: text.link.relation,
+        if (shouldBreakBeforeState(trial, width) && currentState.contentEventCount > 0) {
+          currentState = createSystemLayoutState({
+            document,
+            primaryStaff,
+            voices,
+            semanticToLayoutIds,
+            index: systemStates.length,
+            startClef: activeClef ?? entry.activeClef ?? primaryStaff?.defaultClef,
+            startClefSemanticId: activeClefSemanticId,
           });
-          addIndex(semanticToLayoutIds, text.link.textSpanId, barGlyph.id);
+          systemStates.push(currentState);
+          addVoiceSystemId(voiceToSystemIds, primaryVoice.id, currentState.systemId);
+          placeMusicEventOnState(currentState, document, primaryVoice, primaryStaff ?? entry.staff, entry);
+
+          if (shouldBreakBeforeState(currentState, width)) {
+            diagnostics.push({
+              severity: "warning",
+              code: "layout-system-overflow",
+              message: `Music event '${entry.eventId}' is wider than the available system width.`,
+              semanticIds: [entry.eventId],
+              layoutIds: currentState.context.glyphs.map((glyph) => glyph.id),
+            });
+          }
+        } else {
+          currentState = trial;
+          systemStates[systemStates.length - 1] = currentState;
         }
 
-        pendingClefX = x;
-        x += BAR_GAP;
+        semanticToLayoutIds = currentState.context.semanticToLayoutIds;
       }
     }
   }
 
-  const lyricBaselineY = lyricBaselineForNeumes(neumes);
-  const syllables = layoutSyllables(document, systemId, textSpanToNeumeIds, textSpanRelations, textSpanAnchors, neumes, lyricBaselineY, textSpanToSyllableIds, semanticToLayoutIds);
-  const textRuns = layoutLyricTextRuns(document, systemId, syllables);
-  const height = Math.max(
-    defaultLyricBaseline(),
-    ...syllables.map((syllable) => syllable.baselineY),
-  ) + 2;
-  const layoutStaff: LayoutStaff = {
-    id: layoutStaffId,
-    semanticStaffId: primaryStaff?.id ?? "missing_staff",
-    voiceIds: voices.map((voice) => voice.id),
-    origin: { x: STAFF_LEFT, y: STAFF_TOP },
-    width: staffWidth,
-    lineCount: 4,
-    lineYs,
-    lineThickness: LINE_THICKNESS,
-    ledgerSegments: [],
-    clefRuns: primaryStaff === undefined ? [] : [{
-      clefEventId: clefSemanticId,
-      x: STAFF_LEFT,
-      glyphId: clefGlyphId,
-      governsFromMusicEventId: firstNeumeEventId(document, primaryVoice),
-    }],
-  };
+  const systems: LayoutSystem[] = [];
+  let nextSystemY = 0;
 
-  const system: LayoutSystem = {
-    id: systemId,
-    index: 0,
-    rect: { x: 0, y: 0, width, height },
-    contentRect: { x: SYSTEM_MARGIN, y: SYSTEM_MARGIN, width: Math.max(0, width - (SYSTEM_MARGIN * 2)), height: height - SYSTEM_MARGIN },
-    staffSpace: STAFF_LINE_INTERVAL,
-    staffs: [layoutStaff],
-    neumes,
-    syllables,
-    textRuns,
-    glyphs: glyphs.sort(compareGlyphs),
-    breakInfo: {
-      kind: "auto",
-      justification: 0,
-      widowPenaltyApplied: false,
-      orphanPenaltyApplied: false,
-    },
-  };
+  for (const state of systemStates) {
+    const baseSystem = finalizeSystemLayoutState({
+      state,
+      document,
+      primaryStaff,
+      voices,
+      primaryVoice,
+      staffWidth,
+      width,
+      textSpanToSyllableIds,
+    });
+    const system = translateSystem(baseSystem, nextSystemY);
+    systems.push(system);
+    semanticToLayoutIds = mergeIndexes(semanticToLayoutIds, state.context.semanticToLayoutIds);
+    nextSystemY += system.rect.height + SYSTEM_GAP;
+  }
+
+  const viewportHeight = systems.length === 0
+    ? defaultLyricBaseline() + 2
+    : Math.max(...systems.map((system) => system.rect.y + system.rect.height));
 
   return {
     schema: "neuma.layout",
@@ -486,11 +481,11 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
     },
     viewport: {
       width,
-      height,
+      height: viewportHeight,
       pageMode: "continuous",
     },
     defs: defaultGlyphDefs(),
-    systems: [system],
+    systems,
     renderHints: {
       preferredRenderer: "svg",
       pixelSnap: false,
@@ -503,6 +498,313 @@ export function layoutChant(document: ChantDocument, options: LayoutOptions): La
     },
     diagnostics,
   };
+}
+
+type CreateSystemLayoutStateOptions = {
+  document: ChantDocument;
+  primaryStaff?: Staff;
+  voices: Voice[];
+  semanticToLayoutIds: Record<Id, Id[]>;
+  index: number;
+  startClef?: ClefDef;
+  startClefSemanticId: Id;
+};
+
+type FinalizeSystemLayoutStateOptions = {
+  state: SystemLayoutState;
+  document: ChantDocument;
+  primaryStaff?: Staff;
+  voices: Voice[];
+  primaryVoice?: Voice;
+  staffWidth: number;
+  width: number;
+  textSpanToSyllableIds: Record<Id, Id[]>;
+};
+
+function createSystemLayoutState(options: CreateSystemLayoutStateOptions): SystemLayoutState {
+  const systemId = options.index === 0 ? "sys_1" : `sys_${options.index + 1}`;
+  const baseStaffId = options.primaryStaff === undefined ? "lst_missing_staff" : `lst_${safeId(options.primaryStaff.id)}`;
+  const layoutStaffId = options.index === 0 ? baseStaffId : `${baseStaffId}_${systemId}`;
+  const lineYs = [0, 1, 2, 3].map((offset) => STAFF_TOP + (offset * STAFF_LINE_INTERVAL));
+  const context: LayoutContext = {
+    doc: options.document,
+    systemId,
+    staffId: layoutStaffId,
+    lineYs,
+    semanticToLayoutIds: cloneIndex(options.semanticToLayoutIds),
+    textSpanToNeumeIds: {},
+    textSpanRelations: {},
+    textSpanAnchors: {},
+    glyphs: [],
+    neumes: [],
+  };
+  const startClefGlyphId = options.index === 0
+    ? `lg_${safeId(options.startClefSemanticId)}_clef`
+    : `lg_${safeId(options.startClefSemanticId)}_clef_${systemId}`;
+
+  if (options.primaryStaff !== undefined) {
+    const clefGlyph = makeClefGlyph(
+      startClefGlyphId,
+      options.startClefSemanticId,
+      systemId,
+      layoutStaffId,
+      STAFF_LEFT,
+      options.startClef ?? options.primaryStaff.defaultClef,
+      lineYs,
+    );
+    context.glyphs.push(clefGlyph);
+    addIndex(context.semanticToLayoutIds, options.startClefSemanticId, clefGlyph.id);
+  }
+
+  return {
+    systemId,
+    index: options.index,
+    layoutStaffId,
+    lineYs,
+    context,
+    x: STAFF_LEFT + 2.4,
+    startClef: options.startClef,
+    startClefSemanticId: options.startClefSemanticId,
+    startClefGlyphId,
+    contentEventCount: 0,
+  };
+}
+
+function cloneSystemLayoutState(state: SystemLayoutState): SystemLayoutState {
+  return {
+    ...state,
+    context: {
+      ...state.context,
+      semanticToLayoutIds: cloneIndex(state.context.semanticToLayoutIds),
+      textSpanToNeumeIds: cloneIndex(state.context.textSpanToNeumeIds),
+      textSpanRelations: { ...state.context.textSpanRelations },
+      textSpanAnchors: cloneAnchorIndex(state.context.textSpanAnchors),
+      glyphs: [...state.context.glyphs],
+      neumes: [...state.context.neumes],
+    },
+    underlayCursor: state.underlayCursor === undefined ? undefined : { ...state.underlayCursor },
+  };
+}
+
+function placeClefChangeOnState(state: SystemLayoutState, eventId: Id, clef: ClefDef): void {
+  const clefX = state.pendingClefX ?? state.x;
+  const inlineClefGlyph = makeClefGlyph(
+    `lg_${safeId(eventId)}_clef${state.index === 0 ? "" : `_${state.systemId}`}`,
+    eventId,
+    state.systemId,
+    state.layoutStaffId,
+    clefX,
+    clef,
+    state.lineYs,
+  );
+  state.context.glyphs.push(inlineClefGlyph);
+  addIndex(state.context.semanticToLayoutIds, eventId, inlineClefGlyph.id);
+  state.x = clefX + 2.4;
+  state.pendingClefX = undefined;
+}
+
+function placeMusicEventOnState(
+  state: SystemLayoutState,
+  document: ChantDocument,
+  voice: Voice,
+  staff: Staff,
+  entry: ResolvedVoiceEvent,
+): void {
+  if (entry.event instanceof NeumeGroupEvent) {
+    state.pendingClefX = undefined;
+    state.x = applyUnderlaySpacing(document, voice.id, entry.eventId, state.x, NOTE_WIDTH / 2, state.underlayCursor);
+    const neumeGroup = document.music.neumeGroups[entry.event.neumeGroupId];
+    if (neumeGroup === undefined) {
+      return;
+    }
+
+    const notes = neumeGroup.noteIds.flatMap((noteId) => {
+      const note = document.music.notes[noteId];
+      return note === undefined ? [] : [note];
+    });
+    const laidOut = layoutNeumeGroup(state.context, voice, staff, neumeGroup, notes, entry.activeClef ?? staff.defaultClef, state.x);
+    state.underlayCursor = underlayPlacementForEvent(document, voice.id, entry.eventId, state.x + (NOTE_WIDTH / 2), state.underlayCursor);
+    state.x = laidOut.nextX;
+    state.contentEventCount += 1;
+    return;
+  }
+
+  if (entry.event instanceof BarEvent) {
+    const barGlyphId = `lg_${safeId(entry.eventId)}_bar`;
+    const barDef = barDefKey(entry.event.kind);
+    const barSize = glyphSizeForDef(barDef);
+    state.x = applyUnderlaySpacing(document, voice.id, entry.eventId, state.x, BAR_SIDE_GAP + (barSize.width / 2), state.underlayCursor);
+    const barX = state.x + BAR_SIDE_GAP;
+    const barGlyph = makeGlyph({
+      id: barGlyphId,
+      semanticId: entry.eventId,
+      systemId: state.systemId,
+      staffId: state.layoutStaffId,
+      defKey: barDef,
+      kind: "barline",
+      x: barX,
+      y: barY(barDef, state.lineYs),
+      width: barSize.width,
+      height: barSize.height,
+      zIndex: 2,
+      classes: ["barline", `barline-${entry.event.kind}`],
+    });
+    state.context.glyphs.push(barGlyph);
+    addIndex(state.context.semanticToLayoutIds, entry.eventId, barGlyph.id);
+
+    for (const text of getTextForEvent(document, voice.id, entry.eventId)) {
+      addTextSpanAnchor(state.context, text.link.textSpanId, {
+        x: barX + (barGlyph.width / 2),
+        spanStart: barX,
+        spanEnd: barX + barGlyph.width,
+        relation: text.link.relation,
+      });
+      addIndex(state.context.semanticToLayoutIds, text.link.textSpanId, barGlyph.id);
+    }
+
+    state.pendingClefX = barX;
+    state.underlayCursor = underlayPlacementForEvent(document, voice.id, entry.eventId, barX + (barGlyph.width / 2), state.underlayCursor);
+    state.x = barX + barGlyph.width + BAR_SIDE_GAP;
+    state.contentEventCount += 1;
+  }
+}
+
+function shouldBreakBeforeState(state: SystemLayoutState, width: number): boolean {
+  const rightBoundary = Math.max(STAFF_LEFT, width - SYSTEM_MARGIN);
+  return systemRightEdge(state) > rightBoundary;
+}
+
+function systemRightEdge(state: SystemLayoutState): number {
+  const glyphRight = state.context.glyphs.reduce((right, glyph) => Math.max(right, glyph.x + glyph.width), STAFF_LEFT);
+  const lyricRight = Object.entries(state.context.textSpanAnchors).reduce((right, [textSpanId, anchors]) => {
+    const explicitAnchor = explicitTextSpanAnchor(anchors);
+    if (explicitAnchor === undefined) {
+      return right;
+    }
+
+    const textWidth = measureText(getHyphenatedTextForSpan(state.context.doc, textSpanId));
+    return Math.max(right, explicitAnchor.x + (textWidth / 2));
+  }, STAFF_LEFT);
+
+  return Math.max(glyphRight, lyricRight);
+}
+
+function finalizeSystemLayoutState(options: FinalizeSystemLayoutStateOptions): LayoutSystem {
+  const state = options.state;
+  const lyricBaselineY = lyricBaselineForNeumes(state.context.neumes, state.lineYs);
+  const textSpanIds = layoutTextSpanOrderForSystem(
+    options.document,
+    state.context.textSpanAnchors,
+    state.context.textSpanToNeumeIds,
+  );
+  const syllables = layoutSyllables(
+    options.document,
+    state.systemId,
+    state.context.textSpanToNeumeIds,
+    state.context.textSpanRelations,
+    state.context.textSpanAnchors,
+    state.context.neumes,
+    lyricBaselineY,
+    options.textSpanToSyllableIds,
+    state.context.semanticToLayoutIds,
+    textSpanIds,
+  );
+  const textRuns = layoutLyricTextRuns(options.document, state.systemId, syllables);
+  const height = Math.max(
+    defaultLyricBaseline(state.lineYs),
+    ...syllables.map((syllable) => syllable.baselineY),
+  ) + 2;
+  const layoutStaff: LayoutStaff = {
+    id: state.layoutStaffId,
+    semanticStaffId: options.primaryStaff?.id ?? "missing_staff",
+    voiceIds: options.voices.map((voice) => voice.id),
+    origin: { x: STAFF_LEFT, y: state.lineYs[0] },
+    width: options.staffWidth,
+    lineCount: 4,
+    lineYs: state.lineYs,
+    lineThickness: LINE_THICKNESS,
+    ledgerSegments: [],
+    clefRuns: options.primaryStaff === undefined ? [] : [{
+      clefEventId: state.startClefSemanticId,
+      x: STAFF_LEFT,
+      glyphId: state.startClefGlyphId,
+      governsFromMusicEventId: firstNeumeEventId(options.document, options.primaryVoice),
+    }],
+  };
+
+  return {
+    id: state.systemId,
+    index: state.index,
+    rect: { x: 0, y: 0, width: options.width, height },
+    contentRect: { x: SYSTEM_MARGIN, y: SYSTEM_MARGIN, width: Math.max(0, options.width - (SYSTEM_MARGIN * 2)), height: height - SYSTEM_MARGIN },
+    staffSpace: STAFF_LINE_INTERVAL,
+    staffs: [layoutStaff],
+    neumes: state.context.neumes,
+    syllables,
+    textRuns,
+    glyphs: state.context.glyphs.sort(compareGlyphs),
+    breakInfo: {
+      kind: "auto",
+      justification: 0,
+      widowPenaltyApplied: false,
+      orphanPenaltyApplied: false,
+    },
+  };
+}
+
+function translateSystem(system: LayoutSystem, dy: number): LayoutSystem {
+  if (dy === 0) {
+    return system;
+  }
+
+  return {
+    ...system,
+    rect: translateRect(system.rect, 0, dy),
+    contentRect: translateRect(system.contentRect, 0, dy),
+    staffs: system.staffs.map((staff) => ({
+      ...staff,
+      origin: { x: staff.origin.x, y: staff.origin.y + dy },
+      lineYs: staff.lineYs.map((lineY) => lineY + dy),
+      ledgerSegments: staff.ledgerSegments.map((segment) => ({ ...segment, y: segment.y + dy })),
+    })),
+    neumes: system.neumes.map((neume) => ({
+      ...neume,
+      rect: translateRect(neume.rect, 0, dy),
+      anchor: { x: neume.anchor.x, y: neume.anchor.y + dy },
+    })),
+    syllables: system.syllables.map((syllable) => ({
+      ...syllable,
+      bounds: translateRect(syllable.bounds, 0, dy),
+      baselineY: syllable.baselineY + dy,
+    })),
+    textRuns: system.textRuns.map((run) => ({
+      ...run,
+      y: run.y + dy,
+      baselineY: run.baselineY + dy,
+    })),
+    glyphs: system.glyphs.map((glyph) => ({
+      ...glyph,
+      y: glyph.y + dy,
+      hitBox: glyph.hitBox === undefined ? undefined : translateRect(glyph.hitBox, 0, dy),
+    })),
+  };
+}
+
+function translateRect(rect: Rect, dx: number, dy: number): Rect {
+  return {
+    x: rect.x + dx,
+    y: rect.y + dy,
+    width: rect.width,
+    height: rect.height,
+  };
+}
+
+function addVoiceSystemId(index: Record<Id, Id[]>, voiceId: Id, systemId: Id): void {
+  const systemIds = index[voiceId] ?? [];
+  if (!systemIds.includes(systemId)) {
+    systemIds.push(systemId);
+  }
+  index[voiceId] = systemIds;
 }
 
 function layoutNeumeGroup(
@@ -520,6 +822,10 @@ function layoutNeumeGroup(
   const boxes: Rect[] = [];
   const clef = activeClef ?? staff.defaultClef;
   const porrectusSwashDefKey = porrectusSwashDefKeyForNeume(neumeGroup, notes, clef);
+  const podatus = isPodatusNeume(neumeGroup, notes, clef);
+  const clivis = isClivisNeume(neumeGroup, notes, clef);
+  const torculus = isTorculusNeume(neumeGroup, notes, clef);
+  let advanceWidth = neumeAdvanceWidth(porrectusSwashDefKey, notes.length);
 
   if (porrectusSwashDefKey !== undefined) {
     layoutPorrectusNeumeGroup({
@@ -533,6 +839,39 @@ function layoutNeumeGroup(
       boxes,
       swashDefKey: porrectusSwashDefKey,
     });
+  } else if (podatus) {
+    advanceWidth = layoutPodatusNeumeGroup({
+      context,
+      neumeGroupId,
+      notes,
+      clef,
+      x,
+      glyphIds,
+      noteEventIds,
+      boxes,
+    }).advanceWidth;
+  } else if (clivis) {
+    advanceWidth = layoutClivisNeumeGroup({
+      context,
+      neumeGroupId,
+      notes,
+      clef,
+      x,
+      glyphIds,
+      noteEventIds,
+      boxes,
+    }).advanceWidth;
+  } else if (torculus) {
+    advanceWidth = layoutTorculusNeumeGroup({
+      context,
+      neumeGroupId,
+      notes,
+      clef,
+      x,
+      glyphIds,
+      noteEventIds,
+      boxes,
+    }).advanceWidth;
   } else {
     notes.forEach((note, index) => {
       const noteX = x + (index * NOTE_GAP);
@@ -541,6 +880,7 @@ function layoutNeumeGroup(
         context,
         neumeGroupId,
         note,
+        clef,
         x: noteX,
         y: noteY,
         defKey: noteDefKey(note.sign),
@@ -599,7 +939,7 @@ function layoutNeumeGroup(
   }
 
   return {
-    nextX: x + neumeAdvanceWidth(porrectusSwashDefKey, notes.length) + NEUME_GAP,
+    nextX: x + advanceWidth + NEUME_GAP,
   };
 }
 
@@ -607,6 +947,7 @@ type LayoutVisibleNoteGlyphOptions = {
   context: LayoutContext;
   neumeGroupId: Id;
   note: LayoutNoteInput;
+  clef: ClefDef | undefined;
   x: number;
   y: number;
   defKey: Id;
@@ -651,6 +992,77 @@ type LayoutPorrectusStartLineOptions = {
   x: number;
   firstY: number;
   secondY: number;
+  glyphIds: Id[];
+  boxes: Rect[];
+};
+
+type LayoutClivisNeumeGroupOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  notes: LayoutNoteInput[];
+  clef: ClefDef | undefined;
+  x: number;
+  glyphIds: Id[];
+  noteEventIds: Id[];
+  boxes: Rect[];
+};
+
+type LayoutPodatusNeumeGroupOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  notes: LayoutNoteInput[];
+  clef: ClefDef | undefined;
+  x: number;
+  glyphIds: Id[];
+  noteEventIds: Id[];
+  boxes: Rect[];
+};
+
+type LayoutPodatusConnectorLineOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  lower: LayoutNoteInput;
+  upper: LayoutNoteInput;
+  x: number;
+  lowerY: number;
+  upperY: number;
+  glyphIds: Id[];
+  boxes: Rect[];
+};
+
+type LayoutTorculusNeumeGroupOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  notes: LayoutNoteInput[];
+  clef: ClefDef | undefined;
+  x: number;
+  glyphIds: Id[];
+  noteEventIds: Id[];
+  boxes: Rect[];
+};
+
+type LayoutTorculusConnectorLineOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  from: LayoutNoteInput;
+  to: LayoutNoteInput;
+  clef: ClefDef;
+  x: number;
+  fromY: number;
+  toY: number;
+  glyphIds: Id[];
+  boxes: Rect[];
+};
+
+type LayoutClivisHangingLineOptions = {
+  context: LayoutContext;
+  neumeGroupId: Id;
+  upper: LayoutNoteInput;
+  lower: LayoutNoteInput;
+  clef: ClefDef;
+  x: number;
+  upperY: number;
+  lowerY: number;
   glyphIds: Id[];
   boxes: Rect[];
 };
@@ -713,6 +1125,7 @@ function layoutPorrectusNeumeGroup(options: LayoutPorrectusNeumeGroupOptions): v
     context: options.context,
     neumeGroupId: options.neumeGroupId,
     note: first,
+    clef: options.clef,
     noteX: options.x,
     noteY: firstY,
     baseGlyphId: swashGlyphId,
@@ -737,6 +1150,7 @@ function layoutPorrectusNeumeGroup(options: LayoutPorrectusNeumeGroupOptions): v
     context: options.context,
     neumeGroupId: options.neumeGroupId,
     note: third,
+    clef: options.clef,
     x: endingX,
     y: thirdY,
     defKey: endingDefKey,
@@ -746,6 +1160,288 @@ function layoutPorrectusNeumeGroup(options: LayoutPorrectusNeumeGroupOptions): v
     noteEventIds: options.noteEventIds,
     boxes: options.boxes,
   });
+}
+
+function layoutPodatusNeumeGroup(options: LayoutPodatusNeumeGroupOptions): { advanceWidth: number } {
+  const [lower, upper] = options.notes;
+  const lowerDefKey = podatusLowerDefKey(lower);
+  const upperDefKey = podatusUpperDefKey(upper);
+  const lowerSize = glyphSizeForDef(lowerDefKey);
+  const upperSize = glyphSizeForDef(upperDefKey);
+  const lowerY = noteCenterY(options.context, lower, options.clef);
+  const upperY = noteCenterY(options.context, upper, options.clef);
+  const upperX = options.x + PODATUS_UPPER_X_OFFSET;
+
+  layoutVisibleNoteGlyph({
+    context: options.context,
+    neumeGroupId: options.neumeGroupId,
+    note: lower,
+    clef: options.clef,
+    x: options.x,
+    y: lowerY,
+    defKey: lowerDefKey,
+    kind: noteKind(lower.sign),
+    classes: ["note", "note-podatus-lower", `note-${lower.sign}`],
+    glyphIds: options.glyphIds,
+    noteEventIds: options.noteEventIds,
+    boxes: options.boxes,
+  });
+
+  layoutPodatusConnectorLine({
+    context: options.context,
+    neumeGroupId: options.neumeGroupId,
+    lower,
+    upper,
+    x: options.x + PODATUS_CONNECTOR_X_OFFSET,
+    lowerY,
+    upperY,
+    glyphIds: options.glyphIds,
+    boxes: options.boxes,
+  });
+
+  layoutVisibleNoteGlyph({
+    context: options.context,
+    neumeGroupId: options.neumeGroupId,
+    note: upper,
+    clef: options.clef,
+    x: upperX,
+    y: upperY,
+    defKey: upperDefKey,
+    kind: noteKind(upper.sign),
+    classes: ["note", "note-podatus-upper", `note-${upper.sign}`],
+    glyphIds: options.glyphIds,
+    noteEventIds: options.noteEventIds,
+    boxes: options.boxes,
+  });
+
+  return {
+    advanceWidth: Math.max(lowerSize.width, PODATUS_UPPER_X_OFFSET + upperSize.width),
+  };
+}
+
+function layoutPodatusConnectorLine(options: LayoutPodatusConnectorLineOptions): void {
+  const y = Math.min(options.lowerY, options.upperY);
+  const height = Math.abs(options.upperY - options.lowerY);
+
+  if (height === 0) {
+    return;
+  }
+
+  const line = makeGlyph({
+    id: `lg_${safeId(options.lower.id)}_${safeId(options.upper.id)}_podatus_connector`,
+    semanticId: options.neumeGroupId,
+    parentId: `ln_${safeId(options.neumeGroupId)}`,
+    systemId: options.context.systemId,
+    staffId: options.context.staffId,
+    defKey: "neumeConnectorLine",
+    kind: "neumeLine",
+    x: options.x,
+    y,
+    width: NEUME_CONNECTOR_LINE_WIDTH,
+    height,
+    zIndex: 2,
+    classes: ["neume-line", "podatus-connector-line"],
+  });
+
+  options.glyphIds.push(line.id);
+  options.boxes.push(line.hitBox ?? line);
+  options.context.glyphs.push(line);
+}
+
+function layoutClivisNeumeGroup(options: LayoutClivisNeumeGroupOptions): { advanceWidth: number } {
+  const [upper, lower] = options.notes;
+  const upperDefKey = clivisUpperDefKey(upper);
+  const lowerDefKey = noteDefKey(lower.sign);
+  const upperSize = glyphSizeForDef(upperDefKey);
+  const lowerSize = glyphSizeForDef(lowerDefKey);
+  const upperY = noteCenterY(options.context, upper, options.clef);
+  const lowerY = noteCenterY(options.context, lower, options.clef);
+  const lowerX = options.x + upperSize.width;
+
+  if (options.clef !== undefined && upper.sign !== "oriscus") {
+    layoutClivisHangingLine({
+      context: options.context,
+      neumeGroupId: options.neumeGroupId,
+      upper,
+      lower,
+      clef: options.clef,
+      x: options.x + CLIVIS_HANGING_LINE_X_OFFSET,
+      upperY,
+      lowerY,
+      glyphIds: options.glyphIds,
+      boxes: options.boxes,
+    });
+  }
+
+  layoutVisibleNoteGlyph({
+    context: options.context,
+    neumeGroupId: options.neumeGroupId,
+    note: upper,
+    clef: options.clef,
+    x: options.x,
+    y: upperY,
+    defKey: upperDefKey,
+    kind: noteKind(upper.sign),
+    classes: ["note", "note-clivis-upper", `note-${upper.sign}`],
+    glyphIds: options.glyphIds,
+    noteEventIds: options.noteEventIds,
+    boxes: options.boxes,
+  });
+
+  layoutVisibleNoteGlyph({
+    context: options.context,
+    neumeGroupId: options.neumeGroupId,
+    note: lower,
+    clef: options.clef,
+    x: lowerX,
+    y: lowerY,
+    defKey: lowerDefKey,
+    kind: noteKind(lower.sign),
+    classes: ["note", "note-clivis-lower", `note-${lower.sign}`],
+    glyphIds: options.glyphIds,
+    noteEventIds: options.noteEventIds,
+    boxes: options.boxes,
+  });
+
+  return {
+    advanceWidth: upperSize.width + lowerSize.width,
+  };
+}
+
+function layoutTorculusNeumeGroup(options: LayoutTorculusNeumeGroupOptions): { advanceWidth: number } {
+  const notePositions = options.notes.map((note, index) => {
+    const noteXOffsets = [
+      0,
+      TORCULUS_SECOND_NOTE_X_OFFSET,
+      TORCULUS_THIRD_NOTE_X_OFFSET,
+    ];
+    const xOffset = noteXOffsets[index] ?? (TORCULUS_THIRD_NOTE_X_OFFSET + ((index - 2) * NOTE_GAP));
+
+    return {
+      note,
+      x: options.x + xOffset,
+      y: noteCenterY(options.context, note, options.clef),
+    };
+  });
+  const connectorXOffsets = [
+    TORCULUS_FIRST_CONNECTOR_X_OFFSET,
+    TORCULUS_SECOND_CONNECTOR_X_OFFSET,
+  ];
+
+  if (options.clef !== undefined) {
+    for (let index = 1; index < notePositions.length; index += 1) {
+      const previous = notePositions[index - 1];
+      const current = notePositions[index];
+      const connectorXOffset = connectorXOffsets[index - 1] ?? (current.x - options.x + (NEUME_CONNECTOR_LINE_WIDTH / 2));
+
+      layoutTorculusConnectorLine({
+        context: options.context,
+        neumeGroupId: options.neumeGroupId,
+        from: previous.note,
+        to: current.note,
+        clef: options.clef,
+        x: options.x + connectorXOffset,
+        fromY: previous.y,
+        toY: current.y,
+        glyphIds: options.glyphIds,
+        boxes: options.boxes,
+      });
+    }
+  }
+
+  for (const position of notePositions) {
+    layoutVisibleNoteGlyph({
+      context: options.context,
+      neumeGroupId: options.neumeGroupId,
+      note: position.note,
+      clef: options.clef,
+      x: position.x,
+      y: position.y,
+      defKey: noteDefKey(position.note.sign),
+      kind: noteKind(position.note.sign),
+      classes: ["note", "note-torculus", `note-${position.note.sign}`],
+      glyphIds: options.glyphIds,
+      noteEventIds: options.noteEventIds,
+      boxes: options.boxes,
+    });
+  }
+
+  return {
+    advanceWidth: torculusAdvanceWidth(options.notes.length),
+  };
+}
+
+function layoutClivisHangingLine(options: LayoutClivisHangingLineOptions): void {
+  const upperStep = getStaffPosition(options.upper.pitch, options.clef, 4).staffStep;
+  const lowerStep = getStaffPosition(options.lower.pitch, options.clef, 4).staffStep;
+  const intervalSteps = lowerStep - upperStep;
+  const lowerWithinStaff = lowerStep < 6;
+  const extendedLowerY = intervalSteps === 1 && upperStep % 2 === 0 && lowerWithinStaff
+    ? options.lowerY + STAFF_STEP_INTERVAL
+    : options.lowerY;
+  const y = Math.min(options.upperY, extendedLowerY);
+  const lineEndY = extendedLowerY + CLIVIS_HANGING_LINE_PUNCTUM_OVERSHOOT;
+  const height = lineEndY - y;
+
+  if (height <= 0) {
+    return;
+  }
+
+  const line = makeGlyph({
+    id: `lg_${safeId(options.lower.id)}_${safeId(options.upper.id)}_clivis_hanging_line`,
+    semanticId: options.neumeGroupId,
+    parentId: `ln_${safeId(options.neumeGroupId)}`,
+    systemId: options.context.systemId,
+    staffId: options.context.staffId,
+    defKey: "neumeConnectorLine",
+    kind: "neumeLine",
+    x: options.x,
+    y,
+    width: NEUME_CONNECTOR_LINE_WIDTH,
+    height,
+    zIndex: 2,
+    classes: ["neume-line", "clivis-hanging-line"],
+  });
+
+  options.glyphIds.push(line.id);
+  options.boxes.push(line.hitBox ?? line);
+  options.context.glyphs.push(line);
+}
+
+function layoutTorculusConnectorLine(options: LayoutTorculusConnectorLineOptions): void {
+  const fromStaffStep = getStaffPosition(options.from.pitch, options.clef, 4).staffStep;
+  const toStaffStep = getStaffPosition(options.to.pitch, options.clef, 4).staffStep;
+
+  if (Math.abs(toStaffStep - fromStaffStep) < TORCULUS_CONNECTOR_MIN_INTERVAL_STEPS) {
+    return;
+  }
+
+  const y = Math.min(options.fromY, options.toY);
+  const height = Math.abs(options.toY - options.fromY);
+
+  if (height === 0) {
+    return;
+  }
+
+  const line = makeGlyph({
+    id: `lg_${safeId(options.from.id)}_${safeId(options.to.id)}_torculus_connector`,
+    semanticId: options.neumeGroupId,
+    parentId: `ln_${safeId(options.neumeGroupId)}`,
+    systemId: options.context.systemId,
+    staffId: options.context.staffId,
+    defKey: "neumeConnectorLine",
+    kind: "neumeLine",
+    x: options.x,
+    y,
+    width: NEUME_CONNECTOR_LINE_WIDTH,
+    height,
+    zIndex: 2,
+    classes: ["neume-line", "torculus-connector-line"],
+  });
+
+  options.glyphIds.push(line.id);
+  options.boxes.push(line.hitBox ?? line);
+  options.context.glyphs.push(line);
 }
 
 function layoutPorrectusStartLine(options: LayoutPorrectusStartLineOptions): void {
@@ -837,6 +1533,7 @@ function layoutVisibleNoteGlyph(options: LayoutVisibleNoteGlyphOptions): void {
     context: options.context,
     neumeGroupId: options.neumeGroupId,
     note: options.note,
+    clef: options.clef,
     noteX: options.x,
     noteY: options.y,
     baseGlyphId: glyphId,
@@ -849,6 +1546,7 @@ type AddMoraGlyphsOptions = {
   context: LayoutContext;
   neumeGroupId: Id;
   note: LayoutNoteInput;
+  clef: ClefDef | undefined;
   noteX: number;
   noteY: number;
   baseGlyphId: Id;
@@ -858,6 +1556,7 @@ type AddMoraGlyphsOptions = {
 
 function addMoraGlyphs(options: AddMoraGlyphsOptions): void {
   for (let moraIndex = 0; moraIndex < moraGlyphCount(options.note.rhythmicSigns ?? []); moraIndex += 1) {
+    const moraY = moraCenterY(options.note, options.clef, options.noteY);
     const moraGlyph = makeGlyph({
       id: `${options.baseGlyphId}_mora${moraIndex === 0 ? "" : `_${moraIndex + 1}`}`,
       semanticId: options.note.id,
@@ -867,7 +1566,7 @@ function addMoraGlyphs(options: AddMoraGlyphsOptions): void {
       defKey: "mora",
       kind: "mora",
       x: options.noteX + NOTE_WIDTH + MORA_GAP + (moraIndex * (MORA_SIZE + MORA_GAP)),
-      y: options.noteY - (MORA_SIZE / 2),
+      y: moraY - (MORA_SIZE / 2),
       width: MORA_SIZE,
       height: MORA_SIZE,
       zIndex: 4,
@@ -879,6 +1578,20 @@ function addMoraGlyphs(options: AddMoraGlyphsOptions): void {
     options.context.glyphs.push(moraGlyph);
     addIndex(options.context.semanticToLayoutIds, options.note.id, moraGlyph.id);
   }
+}
+
+function moraCenterY(note: LayoutNoteInput, clef: ClefDef | undefined, noteY: number): number {
+  if (clef === undefined) {
+    return noteY;
+  }
+
+  const position = getStaffPosition(note.pitch, clef, 4);
+
+  if (!position.isOnLine || position.line === undefined) {
+    return noteY;
+  }
+
+  return noteY + MORA_ON_LINE_Y_OFFSET;
 }
 
 function makeLogicalGlyph(glyph: Omit<LayoutGlyph, "classes" | "defKey" | "height" | "hitBox" | "kind" | "reusable" | "width" | "zIndex">): LayoutGlyph {
@@ -910,9 +1623,10 @@ function layoutSyllables(
   baselineY: number,
   textSpanToSyllableIds: Record<Id, Id[]>,
   semanticToLayoutIds: Record<Id, Id[]>,
+  orderedTextSpanIds?: Id[],
 ): LayoutSyllable[] {
   const neumeById = Object.fromEntries(neumes.map((neume) => [neume.id, neume]));
-  const textSpanIds = layoutTextSpanOrder(document, textSpanAnchors, textSpanToNeumeIds);
+  const textSpanIds = orderedTextSpanIds ?? layoutTextSpanOrder(document, textSpanAnchors, textSpanToNeumeIds);
   const explicitAnchors: Record<Id, LayoutTextSpanAnchor> = {};
 
   for (const textSpanId of textSpanIds) {
@@ -938,8 +1652,9 @@ function layoutSyllables(
     const hasMelisma = attachedNeumes.length > 0
       && (relation === "melisma" || attachedNeumes.length > 1 || (firstNeume?.noteEventIds.length ?? 0) > 1);
     const anchorX = anchor.x;
-    const syllableId = `ls_${safeId(textSpanId)}`;
-    const lyricRunId = `txt_${safeId(textSpanId)}`;
+    const suffix = layoutIdSuffix(systemId);
+    const syllableId = `ls_${safeId(textSpanId)}${suffix}`;
+    const lyricRunId = `txt_${safeId(textSpanId)}${suffix}`;
     const syllable: LayoutSyllable = {
       id: syllableId,
       semanticTextSpanId: textSpanId,
@@ -965,10 +1680,45 @@ function layoutSyllables(
       },
     };
 
-    textSpanToSyllableIds[textSpanId] = [syllable.id];
+    addIndex(textSpanToSyllableIds, textSpanId, syllable.id);
     addIndex(semanticToLayoutIds, textSpanId, syllable.id);
     return syllable;
   }).sort((left, right) => left.anchorX - right.anchorX || left.id.localeCompare(right.id));
+}
+
+function layoutTextSpanOrderForSystem(
+  document: ChantDocument,
+  textSpanAnchors: Record<Id, LayoutTextSpanAnchor[]>,
+  textSpanToNeumeIds: Record<Id, Id[]>,
+): Id[] {
+  const globalTextSpanIds = chantTextSpanOrder(document);
+  const anchoredTextSpanIds = Object.keys({
+    ...textSpanToNeumeIds,
+    ...textSpanAnchors,
+  }).filter((textSpanId) => document.text.spans[textSpanId] !== undefined);
+
+  if (anchoredTextSpanIds.length === 0) {
+    return globalTextSpanIds;
+  }
+
+  const anchoredIndexes = anchoredTextSpanIds
+    .map((textSpanId) => globalTextSpanIds.indexOf(textSpanId))
+    .filter((index) => index >= 0);
+  const systemTextSpanIds = new Set<Id>(anchoredTextSpanIds);
+
+  if (anchoredIndexes.length > 0) {
+    const first = Math.min(...anchoredIndexes);
+    const last = Math.max(...anchoredIndexes);
+
+    for (const textSpanId of globalTextSpanIds.slice(first, last + 1)) {
+      systemTextSpanIds.add(textSpanId);
+    }
+  }
+
+  return unique([
+    ...globalTextSpanIds.filter((textSpanId) => systemTextSpanIds.has(textSpanId)),
+    ...anchoredTextSpanIds.filter((textSpanId) => !globalTextSpanIds.includes(textSpanId)),
+  ]);
 }
 
 function layoutTextSpanOrder(
@@ -976,16 +1726,20 @@ function layoutTextSpanOrder(
   textSpanAnchors: Record<Id, LayoutTextSpanAnchor[]>,
   textSpanToNeumeIds: Record<Id, Id[]>,
 ): Id[] {
-  const orderedChantTextSpanIds = document.text.blocks
-    .filter((block) => block.kind === "chantText")
-    .flatMap((block) => block.orderedSpanIds)
-    .filter((textSpanId) => document.text.spans[textSpanId] !== undefined && getHyphenatedTextForSpan(document, textSpanId) !== "");
+  const orderedChantTextSpanIds = chantTextSpanOrder(document);
   const anchoredTextSpanIds = Object.keys({
     ...textSpanToNeumeIds,
     ...textSpanAnchors,
   }).filter((textSpanId) => document.text.spans[textSpanId] !== undefined);
 
   return unique([...orderedChantTextSpanIds, ...anchoredTextSpanIds]);
+}
+
+function chantTextSpanOrder(document: ChantDocument): Id[] {
+  return document.text.blocks
+    .filter((block) => block.kind === "chantText")
+    .flatMap((block) => block.orderedSpanIds)
+    .filter((textSpanId) => document.text.spans[textSpanId] !== undefined && getHyphenatedTextForSpan(document, textSpanId) !== "");
 }
 
 function explicitTextSpanAnchor(anchors: LayoutTextSpanAnchor[] | undefined): LayoutTextSpanAnchor | undefined {
@@ -1051,8 +1805,79 @@ function findAnchoredTextSpanIndex(
   return undefined;
 }
 
-function lyricBaselineForNeumes(neumes: LayoutNeume[]): number {
-  const defaultBaseline = defaultLyricBaseline();
+function applyUnderlaySpacing(
+  document: ChantDocument,
+  voiceId: Id,
+  eventId: Id,
+  x: number,
+  anchorOffset: number,
+  previous: UnderlayPlacement | undefined,
+): number {
+  const placement = underlayPlacementForEvent(document, voiceId, eventId, x + anchorOffset, previous);
+
+  if (placement === undefined || previous === undefined) {
+    return x;
+  }
+
+  const requiredGap = underlayGapBetween(previous, placement);
+  const extra = previous.rightX + requiredGap - placement.leftX;
+
+  return extra > 0 ? x + extra : x;
+}
+
+function underlayPlacementForEvent(
+  document: ChantDocument,
+  voiceId: Id,
+  eventId: Id,
+  anchorX: number,
+  previous?: UnderlayPlacement,
+): UnderlayPlacement | undefined {
+  const text = getTextForEvent(document, voiceId, eventId)
+    .map((entry) => entry.link.textSpanId)
+    .map((textSpanId) => underlayPlacementForTextSpan(document, textSpanId, anchorX))
+    .find((placement) => placement !== undefined && placement.textSpanId !== previous?.textSpanId);
+
+  return text;
+}
+
+function underlayPlacementForTextSpan(
+  document: ChantDocument,
+  textSpanId: Id,
+  anchorX: number,
+): UnderlayPlacement | undefined {
+  const text = getHyphenatedTextForSpan(document, textSpanId);
+
+  if (text === "") {
+    return undefined;
+  }
+
+  const width = measureText(text);
+
+  return {
+    textSpanId,
+    wordId: wordIdForTextSpan(document, textSpanId),
+    leftX: anchorX - (width / 2),
+    rightX: anchorX + (width / 2),
+  };
+}
+
+function underlayGapBetween(left: UnderlayPlacement, right: UnderlayPlacement): number {
+  if (left.wordId !== undefined && right.wordId !== undefined && left.wordId !== right.wordId) {
+    return LYRIC_WORD_GAP;
+  }
+
+  return LYRIC_MIN_GAP;
+}
+
+function wordIdForTextSpan(document: ChantDocument, textSpanId: Id): Id | undefined {
+  const span = document.text.spans[textSpanId];
+  const firstSyllableId = span?.syllableIds[0];
+
+  return firstSyllableId === undefined ? undefined : document.text.syllables[firstSyllableId]?.wordId;
+}
+
+function lyricBaselineForNeumes(neumes: LayoutNeume[], lineYs = defaultLineYs()): number {
+  const defaultBaseline = defaultLyricBaseline(lineYs);
 
   if (neumes.length === 0) {
     return defaultBaseline;
@@ -1084,7 +1909,7 @@ function layoutLyricTextRuns(document: ChantDocument, systemId: Id, syllables: L
       : (left.anchorX + right.anchorX) / 2;
 
     hyphenRuns.push({
-      id: `txt_hyphen_${safeId(left.semanticTextSpanId)}_${safeId(right.semanticTextSpanId)}`,
+      id: `txt_hyphen_${safeId(left.semanticTextSpanId)}_${safeId(right.semanticTextSpanId)}${layoutIdSuffix(systemId)}`,
       role: "lyric",
       text: "-",
       systemId,
@@ -1145,8 +1970,11 @@ function shouldHyphenateBetween(document: ChantDocument, left: LayoutSyllable, r
 
   const leftLastIndex = lastSyllableIndexForSpan(document, word.syllableIds, left.semanticTextSpanId);
   const rightFirstIndex = firstSyllableIndexForSpan(document, word.syllableIds, right.semanticTextSpanId);
+  const availableGap = right.bounds.x - (left.bounds.x + left.bounds.width);
 
-  return leftLastIndex >= 0 && rightFirstIndex === leftLastIndex + 1;
+  return leftLastIndex >= 0
+    && rightFirstIndex === leftLastIndex + 1
+    && availableGap >= LYRIC_HYPHEN_MIN_GAP;
 }
 
 function getHyphenatedTextForSpan(document: ChantDocument, textSpanId: Id): string {
@@ -1203,10 +2031,10 @@ function lastSyllableIndexForSpan(document: ChantDocument, syllableIds: Id[], te
   return -1;
 }
 
-function makeClefGlyph(id: Id, semanticId: Id, systemId: Id, staffId: Id, x: number, clef?: ClefDef): LayoutGlyph {
+function makeClefGlyph(id: Id, semanticId: Id, systemId: Id, staffId: Id, x: number, clef?: ClefDef, lineYs = defaultLineYs()): LayoutGlyph {
   const line = clef?.line ?? 3;
   const staffLine = Math.min(4, Math.max(1, line));
-  const lineY = STAFF_TOP + ((4 - staffLine) * STAFF_LINE_INTERVAL);
+  const lineY = lineYs[4 - staffLine] ?? lineYs[0] ?? STAFF_TOP;
   const defKey = clef?.shape === "f" ? "clefF" : "clefC";
   const glyphSize = glyphSizeForDef(defKey);
   return makeGlyph({
@@ -1276,8 +2104,12 @@ function defaultGlyphDefs(): LayoutGlyphDef[] {
   ];
 }
 
-function defaultLyricBaseline(): number {
-  return STAFF_TOP + STAFF_HEIGHT + LYRIC_BASELINE_BELOW_STAFF;
+function defaultLineYs(): number[] {
+  return [0, 1, 2, 3].map((offset) => STAFF_TOP + (offset * STAFF_LINE_INTERVAL));
+}
+
+function defaultLyricBaseline(lineYs = defaultLineYs()): number {
+  return (lineYs[0] ?? STAFF_TOP) + STAFF_HEIGHT + LYRIC_BASELINE_BELOW_STAFF;
 }
 
 function exsurgeGlyphDef(key: Id, width: number, height: number): LayoutGlyphDef {
@@ -1342,6 +2174,81 @@ function noteKind(sign: string): LayoutGlyphKind {
   }
 }
 
+function clivisUpperDefKey(upper: LayoutNoteInput): Id {
+  return upper.sign === "oriscus" ? "oriscusDescending" : noteDefKey(upper.sign);
+}
+
+function podatusLowerDefKey(lower: LayoutNoteInput): Id {
+  return lower.sign === "punctum" ? "podatusLower" : noteDefKey(lower.sign);
+}
+
+function podatusUpperDefKey(upper: LayoutNoteInput): Id {
+  if (upper.sign === "liquescentAscending") {
+    return "liquescentAscending";
+  }
+
+  if (upper.sign === "liquescentDescending") {
+    return "liquescentDescending";
+  }
+
+  return upper.sign === "punctum" ? "podatusUpper" : noteDefKey(upper.sign);
+}
+
+function isPodatusNeume(
+  neumeGroup: NeumeGroup,
+  notes: LayoutNoteInput[],
+  clef: ClefDef | undefined,
+): boolean {
+  if (notes.length !== 2 || clef === undefined) {
+    return false;
+  }
+
+  const glyphHint = neumeGroup.notationHints.find((hint) => hint.key === "glyph")?.value;
+  const explicitPodatus = neumeGroup.neumeKind === "podatus" || glyphHint === "podatus";
+  const firstStep = getStaffPosition(notes[0].pitch, clef, 4).staffStep;
+  const secondStep = getStaffPosition(notes[1].pitch, clef, 4).staffStep;
+  const ascendsVisually = secondStep < firstStep;
+
+  return explicitPodatus || (ascendsVisually && notes.every((note) => note.sign !== "inclinatum"));
+}
+
+function isClivisNeume(
+  neumeGroup: NeumeGroup,
+  notes: LayoutNoteInput[],
+  clef: ClefDef | undefined,
+): boolean {
+  if (notes.length !== 2 || clef === undefined) {
+    return false;
+  }
+
+  const glyphHint = neumeGroup.notationHints.find((hint) => hint.key === "glyph")?.value;
+  const explicitClivis = neumeGroup.neumeKind === "clivis" || glyphHint === "clivis";
+  const firstStep = getStaffPosition(notes[0].pitch, clef, 4).staffStep;
+  const secondStep = getStaffPosition(notes[1].pitch, clef, 4).staffStep;
+  const descendsVisually = secondStep > firstStep;
+
+  return explicitClivis || (descendsVisually && notes.every((note) => note.sign !== "inclinatum"));
+}
+
+function isTorculusNeume(
+  neumeGroup: NeumeGroup,
+  notes: LayoutNoteInput[],
+  clef: ClefDef | undefined,
+): boolean {
+  if (notes.length !== 3 || clef === undefined) {
+    return false;
+  }
+
+  const glyphHint = neumeGroup.notationHints.find((hint) => hint.key === "glyph")?.value;
+  const explicitTorculus = neumeGroup.neumeKind === "torculus" || glyphHint === "torculus";
+  const firstStep = getStaffPosition(notes[0].pitch, clef, 4).staffStep;
+  const secondStep = getStaffPosition(notes[1].pitch, clef, 4).staffStep;
+  const thirdStep = getStaffPosition(notes[2].pitch, clef, 4).staffStep;
+  const risesThenFalls = secondStep < firstStep && thirdStep > secondStep;
+
+  return explicitTorculus || (risesThenFalls && notes.every((note) => note.sign !== "inclinatum"));
+}
+
 function porrectusSwashDefKeyForNeume(
   neumeGroup: NeumeGroup,
   notes: LayoutNoteInput[],
@@ -1372,7 +2279,7 @@ function porrectusSwashDefKeyForNeume(
 function isPorrectusNeume(neumeGroup: NeumeGroup): boolean {
   const glyphHint = neumeGroup.notationHints.find((hint) => hint.key === "glyph")?.value;
 
-  return neumeGroup.contourKindHint === "porrectus"
+  return neumeGroup.neumeKind === "porrectus"
     || glyphHint === "porrectus"
     || glyphHint === "porrectus1"
     || glyphHint === "porrectus2"
@@ -1426,6 +2333,18 @@ function neumeAdvanceWidth(compoundGlyphKey: Id | undefined, noteCount: number):
   return Math.max(NOTE_WIDTH, noteCount * NOTE_GAP);
 }
 
+function torculusAdvanceWidth(noteCount: number): number {
+  if (noteCount <= 1) {
+    return NOTE_WIDTH;
+  }
+
+  if (noteCount === 2) {
+    return TORCULUS_SECOND_NOTE_X_OFFSET + NOTE_WIDTH;
+  }
+
+  return TORCULUS_THIRD_NOTE_X_OFFSET + NOTE_WIDTH + ((noteCount - 3) * NOTE_GAP);
+}
+
 function moraGlyphCount(rhythmicSigns: RhythmicSign[]): number {
   return rhythmicSigns.reduce((count, sign) => {
     if (sign === "doubleMora") {
@@ -1451,14 +2370,15 @@ function barDefKey(kind: string): Id {
   }
 }
 
-function barY(defKey: Id): number {
+function barY(defKey: Id, lineYs = defaultLineYs()): number {
+  const staffTop = lineYs[0] ?? STAFF_TOP;
   switch (defKey) {
     case "barQuarter":
-      return STAFF_TOP - STAFF_STEP_INTERVAL;
+      return staffTop - STAFF_STEP_INTERVAL;
     case "barHalf":
-      return STAFF_TOP + STAFF_STEP_INTERVAL;
+      return staffTop + STAFF_STEP_INTERVAL;
     default:
-      return STAFF_TOP;
+      return staffTop;
   }
 }
 
@@ -1494,11 +2414,43 @@ function addIndex(index: Record<Id, Id[]>, semanticId: Id, layoutId: Id): void {
   index[semanticId] = ids;
 }
 
+function cloneIndex<T>(index: Record<Id, T[]>): Record<Id, T[]> {
+  return Object.fromEntries(
+    Object.entries(index).map(([id, values]) => [id, [...values]]),
+  );
+}
+
+function cloneAnchorIndex(index: Record<Id, LayoutTextSpanAnchor[]>): Record<Id, LayoutTextSpanAnchor[]> {
+  return Object.fromEntries(
+    Object.entries(index).map(([id, anchors]) => [id, anchors.map((anchor) => ({ ...anchor }))]),
+  );
+}
+
+function mergeIndexes<T>(left: Record<Id, T[]>, right: Record<Id, T[]>): Record<Id, T[]> {
+  const merged = cloneIndex(left);
+
+  for (const [id, values] of Object.entries(right)) {
+    const existing = merged[id] ?? [];
+    for (const value of values) {
+      if (!existing.includes(value)) {
+        existing.push(value);
+      }
+    }
+    merged[id] = existing;
+  }
+
+  return merged;
+}
+
 function addTextSpanAnchor(context: LayoutContext, textSpanId: Id, anchor: LayoutTextSpanAnchor): void {
   const anchors = context.textSpanAnchors[textSpanId] ?? [];
   anchors.push(anchor);
   context.textSpanAnchors[textSpanId] = anchors;
   context.textSpanRelations[textSpanId] = anchor.relation;
+}
+
+function layoutIdSuffix(systemId: Id): string {
+  return systemId === "sys_1" ? "" : `_${safeId(systemId)}`;
 }
 
 function unique(ids: Id[]): Id[] {
