@@ -123,7 +123,7 @@ true
 - `src/editorial`: annotations, variants, and user groups.
 - `src/layout`: semantic layout preference classes.
 - `src/adapter/gabc`: lossless GABC source attachment and projection mapping classes.
-- `src/factory`: helpers for creating and wiring common document objects.
+- `src/operations`: document-level helpers for creating and wiring common semantic objects while preserving cross-plane references.
 - `src/query`: renderer-facing IR queries and clef-relative staff position helpers.
 - `src/validate`: document integrity validation.
 - `src/examples`: test fixtures.
@@ -134,7 +134,7 @@ Implemented:
 
 - Semantic IR classes.
 - GABC attachment/source-mapping classes.
-- Factory helpers for common document construction.
+- Operation helpers for common document construction.
 - A Kyrie example document.
 - Validation helpers.
 - Query helpers for renderer-facing traversal and lookup.

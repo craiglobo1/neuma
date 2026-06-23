@@ -6,7 +6,7 @@ Neuma is a TypeScript library for Gregorian chant editing. The durable source of
 
 When editing code, keep this mental loop:
 
-1. Build or mutate semantic data in `src/document`, `src/text`, `src/music`, `src/alignment`, `src/editorial`, `src/layout`, or `src/factory`.
+1. Build or mutate semantic data in `src/document`, `src/text`, `src/music`, `src/alignment`, `src/editorial`, `src/layout`, or `src/operations`.
 2. Read semantic data through `src/query`.
 3. Check cross-plane references with `src/validate`.
 4. Derive positions in `src/layout/visual.ts`.
@@ -55,6 +55,15 @@ Do not:
 - Use source offsets as semantic IDs.
 - Use layout IDs as semantic IDs.
 - Add references that `validateChantDocument` cannot check.
+
+## API Depth
+
+Prefer deep modules over shallow classes:
+
+- Keep semantic record classes and types simple. Do not add behavior to individual records when the behavior must preserve cross-plane invariants; put that behavior in document-level edit operations instead.
+- Make `src/operations`, future focused edit modules, `src/query`, and `src/validate` do real work behind small APIs. Callers should not have to manually coordinate dictionaries, ordered ID lists, alignment links, operation logs, and validation.
+- Avoid adding thin manager/service classes that only forward CRUD operations to one plane. Add a new abstraction only when it hides meaningful policy, preserves invariants, or answers a semantic question that would otherwise require repeated cross-plane traversal.
+- If outside code needs several dictionary lookups to perform a normal chant-editing task, add a deep query or operation rather than spreading that traversal through callers.
 
 
 ## Layout Engine Notes
